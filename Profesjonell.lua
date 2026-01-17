@@ -140,8 +140,7 @@ end
 
 local function ShareAllRecipes()
     -- Share all recipes from all characters in our DB
-    -- We use a simple throttle to avoid overloading the addon channel
-    -- Sending many messages at once can cause issues.
+    -- We use a throttle to avoid overloading the addon channel
     local recipesToShare = {}
     for charName, recipes in pairs(ProfesjonellDB or {}) do
         if IsInGuild(charName) then
@@ -151,11 +150,31 @@ local function ShareAllRecipes()
         end
     end
 
-    -- Process in chunks or just send all if not too many.
-    -- For now, we'll send them all but it's something to watch.
-    for _, item in ipairs(recipesToShare) do
-        ShareRecipe(item.recipe, item.char)
-    end
+    if table.getn(recipesToShare) == 0 then return end
+
+    -- Process in chunks to avoid disconnects/throttling
+    -- WoW 1.12 addon channel has limits.
+    local index = 1
+    local chunkTimer = CreateFrame("Frame")
+    chunkTimer:SetScript("OnUpdate", function()
+        -- Only process if we haven't been stopped
+        if not chunkTimer:GetScript("OnUpdate") then return end
+        
+        local count = 0
+        -- Send up to 5 recipes per frame (or some other reasonable limit)
+        while index <= table.getn(recipesToShare) and count < 5 do
+            local item = recipesToShare[index]
+            ShareRecipe(item.recipe, item.char)
+            index = index + 1
+            count = count + 1
+        end
+        
+        if index > table.getn(recipesToShare) then
+            chunkTimer:SetScript("OnUpdate", nil)
+            chunkTimer:Hide() -- Hide the frame since we're done
+            Debug("Finished sharing all recipes.")
+        end
+    end)
 end
 
 local function ScanRecipes(isCraft)
@@ -323,9 +342,8 @@ frame:SetScript("OnEvent", function()
                 local delay = 2 + math.random() * 5
                 if not frame.syncTimer or GetTime() > frame.syncTimer then
                     frame.syncTimer = GetTime() + delay
-                    -- We'll just use a simple timer here via OnUpdate if we really wanted to be precise,
-                    -- but for simplicity let's just trigger it if it's the first one we see in a window
-                    RequestSync()
+                    -- Timer handled in OnUpdate
+                    Debug("Sync scheduled in " .. string.format("%.2f", delay) .. "s")
                 end
             end
         elseif string.find(message, "^REMOVE_CHAR:") then
@@ -352,6 +370,19 @@ SlashCmdList["PROFESJONELL"] = function(msg)
         return
     end
 
+    if msg == "sync" then
+        local now = GetTime()
+        if not lastSyncRequest or (now - lastSyncRequest > 30) then
+            Print("Requesting manual sync from guild...")
+            RequestSync()
+            lastSyncRequest = now
+        else
+            local wait = math.ceil(30 - (now - lastSyncRequest))
+            Print("Please wait " .. wait .. "s before syncing again.")
+        end
+        return
+    end
+
     if string.find(msg, "^remove ") then
         local charName = string.sub(msg, 8)
         if charName and charName ~= "" then
@@ -374,6 +405,7 @@ SlashCmdList["PROFESJONELL"] = function(msg)
 
     if not msg or msg == "" then
         Print("Usage: /prof [item link] or ?prof [item link] in guild chat")
+        Print("Manual sync: /prof sync")
         Print("Remove character: /prof remove [name] (Officers only)")
         Print("Toggle debug: /prof debug")
         return
