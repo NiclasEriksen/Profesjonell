@@ -3,6 +3,6 @@
 ## Notes: Gathers all the recipes a character has and exports it to CSV, and syncs it between guild members.
 ## Author: Hjelp+Junie
 ## Version: 2.2
-## SavedVariables: ProfesjonellDB
+## SavedVariables: ProfesjonellDB, ProfesjonellConfig
 
 Profesjonell.lua
