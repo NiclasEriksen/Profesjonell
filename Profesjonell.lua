@@ -228,6 +228,9 @@ frame:SetScript("OnEvent", function()
         if not ProfesjonellDB then
             ProfesjonellDB = {}
         end
+        if not ProfesjonellConfig then
+            ProfesjonellConfig = {}
+        end
         Print("Loaded.")
     elseif event == "TRADE_SKILL_SHOW" then
         ScanRecipes(false)
@@ -343,6 +346,11 @@ end)
 SLASH_PROFESJONELL1 = "/prof"
 SLASH_PROFESJONELL2 = "/profesjonell"
 SlashCmdList["PROFESJONELL"] = function(msg)
+    if msg == "debug" then
+        ProfesjonellConfig.debug = not ProfesjonellConfig.debug
+        Print("Debug mode: " .. (ProfesjonellConfig.debug and "|cff00ff00Enabled|r" or "|cffff0000Disabled|r"))
+        return
+    end
 
     if string.find(msg, "^remove ") then
         local charName = string.sub(msg, 8)
