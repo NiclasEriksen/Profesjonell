@@ -43,42 +43,68 @@ local function FindRecipeHolders(name)
     cleanName = cleanName or name
     local searchName = string.lower(StripPrefix(cleanName))
     
+    UpdateGuildRosterCache()
     local found = {}
+    local partialMatches = {}
+    
     for charName, recipes in pairs(ProfesjonellDB or {}) do
-        local charHasIt = false
-        for rName, _ in pairs(recipes) do
-            if string.lower(StripPrefix(rName)) == searchName then
-                charHasIt = true
-                break
+        -- Only show members who are still in the guild
+        if guildRosterCache[charName] then
+            for rName, _ in pairs(recipes) do
+                local cleanRName = StripPrefix(rName)
+                local lowerRName = string.lower(cleanRName)
+                
+                if lowerRName == searchName then
+                    table.insert(found, charName)
+                    break
+                elseif string.find(lowerRName, searchName, 1, true) then
+                    if not partialMatches[cleanRName] then partialMatches[cleanRName] = {} end
+                    table.insert(partialMatches[cleanRName], charName)
+                end
             end
         end
-        
-        if charHasIt then
-            table.insert(found, charName)
+    end
+    table.sort(found)
+    return found, cleanName, partialMatches
+end
+
+local guildRosterCache = {}
+local lastRosterUpdate = 0
+
+local function UpdateGuildRosterCache()
+    local now = GetTime()
+    -- Request a roster update from the server if it's been a while
+    if now - lastRosterUpdate > 60 then
+        GuildRoster()
+    end
+    
+    if now - lastRosterUpdate < 10 then return end
+    
+    guildRosterCache = {}
+    local num = GetNumGuildMembers()
+    for i = 1, num do
+        local name = GetGuildRosterInfo(i)
+        if name then
+            guildRosterCache[name] = true
         end
     end
-    return found, cleanName
+    lastRosterUpdate = now
 end
 
 local function IsInGuild(name)
     if not GetGuildName() then return false end
-    for i = 1, GetNumGuildMembers() do
-        local gName = GetGuildRosterInfo(i)
-        if gName == name then
-            return true
-        end
-    end
-    return false
+    UpdateGuildRosterCache()
+    return guildRosterCache[name] == true
 end
 
 local function IsOfficer(name)
     if not GetGuildName() then return false end
+    -- We can't easily cache rank without making the cache more complex, 
+    -- but we can at least avoid calling it for every single message.
     for i = 1, GetNumGuildMembers() do
         local gName, rank, rankIndex = GetGuildRosterInfo(i)
         if gName == name then
-            -- Usually rankIndex 0 or 1 are officers/guild master in WoW 1.12
-            -- We'll assume rankIndex <= 1 or rank contains "Officer" or "Master"
-            if rankIndex <= 1 or string.find(string.lower(rank), "officer") or string.find(string.lower(rank), "master") then
+            if rankIndex <= 1 or (rank and (string.find(string.lower(rank), "officer") or string.find(string.lower(rank), "master"))) then
                 return true
             end
         end
@@ -87,10 +113,11 @@ local function IsOfficer(name)
 end
 
 local function GenerateDatabaseHash()
+    UpdateGuildRosterCache()
     -- Create a sorted list of all char:recipe pairs to ensure deterministic hash
     local entries = {}
     for charName, recipes in pairs(ProfesjonellDB or {}) do
-        if IsInGuild(charName) then
+        if guildRosterCache[charName] then
             for recipeName, _ in pairs(recipes) do
                 table.insert(entries, charName .. ":" .. recipeName)
             end
@@ -139,12 +166,20 @@ local function BroadcastHash()
     end
 end
 
+local recipesToShare = {}
+local sharingInProgress = false
 local function ShareAllRecipes()
+    if sharingInProgress then 
+        Debug("Sharing already in progress, skipping.")
+        return 
+    end
+    
+    UpdateGuildRosterCache()
     -- Share all recipes from all characters in our DB
     -- We use a throttle to avoid overloading the addon channel
-    local recipesToShare = {}
+    recipesToShare = {}
     for charName, recipes in pairs(ProfesjonellDB or {}) do
-        if IsInGuild(charName) then
+        if guildRosterCache[charName] then
             for recipeName, _ in pairs(recipes) do
                 table.insert(recipesToShare, {char = charName, recipe = recipeName})
             end
@@ -153,14 +188,12 @@ local function ShareAllRecipes()
 
     if table.getn(recipesToShare) == 0 then return end
 
+    sharingInProgress = true
     -- Process in chunks to avoid disconnects/throttling
     -- WoW 1.12 addon channel has limits.
     local index = 1
     local chunkTimer = CreateFrame("Frame")
     chunkTimer:SetScript("OnUpdate", function()
-        -- Only process if we haven't been stopped
-        if not chunkTimer:GetScript("OnUpdate") then return end
-        
         local count = 0
         -- Send up to 5 recipes per frame (or some other reasonable limit)
         while index <= table.getn(recipesToShare) and count < 5 do
@@ -173,6 +206,7 @@ local function ShareAllRecipes()
         if index > table.getn(recipesToShare) then
             chunkTimer:SetScript("OnUpdate", nil)
             chunkTimer:Hide() -- Hide the frame since we're done
+            sharingInProgress = false
             Debug("Finished sharing all recipes.")
         end
     end)
@@ -230,12 +264,28 @@ frame:SetScript("OnUpdate", function()
 
     for cleanName, data in pairs(pendingReplies) do
         if now >= data.time then
-            local found, _ = FindRecipeHolders(data.originalQuery)
+            local found, _, partialMatches = FindRecipeHolders(data.originalQuery)
             local replyMsg
             if table.getn(found) > 0 then
                 replyMsg = "Profesjonell: " .. cleanName .. " is known by: " .. table.concat(found, ", ")
             else
-                replyMsg = "Profesjonell: No one knows " .. cleanName
+                -- Check if there's exactly one partial match to avoid spamming guild chat
+                local matchCount = 0
+                local pName, pHolders
+                for name, holders in pairs(partialMatches) do
+                    matchCount = matchCount + 1
+                    pName = name
+                    pHolders = holders
+                end
+                
+                if matchCount == 1 then
+                    table.sort(pHolders)
+                    replyMsg = "Profesjonell: " .. pName .. " is known by: " .. table.concat(pHolders, ", ")
+                elseif matchCount > 1 then
+                    replyMsg = "Profesjonell: Multiple matches found for '" .. cleanName .. "'. Please be more specific."
+                else
+                    replyMsg = "Profesjonell: No one knows " .. cleanName
+                end
             end
             SendChatMessage(replyMsg, "GUILD")
             Debug("Sent reply: " .. replyMsg)
@@ -378,6 +428,15 @@ frame:SetScript("OnEvent", function()
             else
                 Debug("Unauthorized removal request for " .. charToRemove .. " from " .. sender)
             end
+        elseif string.find(message, "^REMOVE_RECIPE:") then
+            -- Format: REMOVE_RECIPE:CharacterName:RecipeName
+            local _, _, charName, recipeName = string.find(message, "^REMOVE_RECIPE:([^:]+):(.+)$")
+            if charName and recipeName and IsOfficer(sender) then
+                if ProfesjonellDB[charName] and ProfesjonellDB[charName][recipeName] then
+                    ProfesjonellDB[charName][recipeName] = nil
+                    Print("Removed " .. recipeName .. " from " .. charName .. " as requested by " .. sender)
+                end
+            end
         end
     end
 end)
@@ -441,21 +500,43 @@ SlashCmdList["PROFESJONELL"] = function(msg)
     end
 
     if string.find(msg, "^remove ") then
-        local charName = string.sub(msg, 8)
-        if charName and charName ~= "" then
-            if IsOfficer(GetPlayerName()) then
-                if ProfesjonellDB[charName] then
-                    ProfesjonellDB[charName] = nil
-                    Print("Removed " .. charName .. " from local database and broadcasting removal.")
-                    SendAddonMessage("Profesjonell", "REMOVE_CHAR:" .. charName, "GUILD")
+        if IsOfficer(GetPlayerName()) then
+            local _, _, charName, recipeName = string.find(msg, "^remove ([^%s]+) (.+)$")
+            if charName and recipeName then
+                -- Extract name from item link if possible
+                local _, _, cleanRecipeName = string.find(recipeName, "%[(.+)%]")
+                cleanRecipeName = cleanRecipeName or recipeName
+
+                if ProfesjonellDB[charName] and ProfesjonellDB[charName][cleanRecipeName] then
+                    ProfesjonellDB[charName][cleanRecipeName] = nil
+                    Print("Removed " .. cleanRecipeName .. " from " .. charName .. " and broadcasting.")
+                    
+                    SendAddonMessage("Profesjonell", "REMOVE_RECIPE:" .. charName .. ":" .. cleanRecipeName, "GUILD")
+                    
+                    if GetGuildName() then
+                        SendChatMessage("Profesjonell: Removed " .. cleanRecipeName .. " from " .. charName, "GUILD")
+                    end
                 else
-                    Print("Character " .. charName .. " not found in database.")
+                    Print(charName .. " does not have " .. (cleanRecipeName or "this recipe") .. " in the database.")
                 end
             else
-                Print("Only officers can remove characters from the guild database.")
+                -- If only name is provided, keep the old behavior of removing the whole character
+                local charNameOnly = string.sub(msg, 8)
+                if charNameOnly and charNameOnly ~= "" then
+                    if ProfesjonellDB[charNameOnly] then
+                        ProfesjonellDB[charNameOnly] = nil
+                        Print("Removed " .. charNameOnly .. " from local database and broadcasting removal.")
+                        SendAddonMessage("Profesjonell", "REMOVE_CHAR:" .. charNameOnly, "GUILD")
+                    else
+                        Print("Character " .. charNameOnly .. " not found in database.")
+                    end
+                else
+                    Print("Usage: /prof remove [name] [recipe] (to remove a recipe)")
+                    Print("   or: /prof remove [name] (to remove a character)")
+                end
             end
         else
-            Print("Usage: /prof remove [character name]")
+            Print("Only officers can remove recipes or characters from the guild database.")
         end
         return
     end
@@ -464,18 +545,73 @@ SlashCmdList["PROFESJONELL"] = function(msg)
         Print("Available commands:")
         Print("  /prof [recipe name/link] - Search for who knows a recipe")
         Print("  /prof add [name] [recipe] - Add recipe to a member (officers only)")
+        Print("  /prof remove [name] [recipe] - Remove a recipe from a member (officers only)")
         Print("  /prof remove [name] - Remove a character from DB (officers only)")
         Print("  /prof sync - Request manual sync from guild")
+        Print("  /prof purge - Remove members no longer in guild from local DB (officers only)")
         Print("  /prof debug - Toggle debug mode")
         Print("  ?prof [recipe name/link] - Guild chat query")
         return
     end
 
-    local found, cleanName = FindRecipeHolders(msg)
+    if msg == "purge" then
+        if IsOfficer(GetPlayerName()) then
+            UpdateGuildRosterCache()
+            local charsToRemove = {}
+            for charName, _ in pairs(ProfesjonellDB) do
+                if not guildRosterCache[charName] then
+                    table.insert(charsToRemove, charName)
+                end
+            end
+            
+            local count = table.getn(charsToRemove)
+            if count == 0 then
+                Print("No members to purge.")
+                return
+            end
+
+            -- Process in chunks to avoid disconnects/throttling
+            local index = 1
+            local purgeTimer = CreateFrame("Frame")
+            purgeTimer:SetScript("OnUpdate", function()
+                local chunkCount = 0
+                while index <= count and chunkCount < 5 do
+                    local charName = charsToRemove[index]
+                    ProfesjonellDB[charName] = nil
+                    SendAddonMessage("Profesjonell", "REMOVE_CHAR:" .. charName, "GUILD")
+                    index = index + 1
+                    chunkCount = chunkCount + 1
+                end
+                
+                if index > count then
+                    purgeTimer:SetScript("OnUpdate", nil)
+                    purgeTimer:Hide()
+                    BroadcastHash()
+                    Print("Purged and broadcasted " .. count .. " members no longer in guild.")
+                end
+            end)
+        else
+            Print("Only officers can purge the database.")
+        end
+        return
+    end
+
+    local found, cleanName, partialMatches = FindRecipeHolders(msg)
     
     if table.getn(found) > 0 then
         Print("Characters with " .. cleanName .. ": " .. table.concat(found, ", "))
     else
-        Print("No characters found with " .. cleanName)
+        local matchCount = 0
+        for _ in pairs(partialMatches) do matchCount = matchCount + 1 end
+        
+        if matchCount > 0 then
+            Print("No exact match for '" .. cleanName .. "', but found:")
+            for rName, holders in pairs(partialMatches) do
+                table.sort(holders)
+                Print("  " .. rName .. ": " .. table.concat(holders, ", "))
+            end
+        else
+            Print("No characters found with " .. cleanName)
+        end
     end
 end
