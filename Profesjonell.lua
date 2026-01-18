@@ -9,6 +9,7 @@ frame:RegisterEvent("CRAFT_UPDATE")
 frame:RegisterEvent("CHAT_MSG_ADDON")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("CHAT_MSG_GUILD")
+frame:RegisterEvent("PLAYER_GUILD_UPDATE")
 
 local function Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00Profesjonell:|r " .. (msg or "nil"))
@@ -115,6 +116,15 @@ local function IsOfficer(name)
         end
     end
     return false
+end
+
+local function WipeDatabaseIfNoGuild()
+    if not GetGuildName() then
+        if ProfesjonellDB and next(ProfesjonellDB) then
+            ProfesjonellDB = {}
+            Print("You are no longer in a guild. The database has been wiped for security/privacy.")
+        end
+    end
 end
 
 local function GenerateDatabaseHash()
@@ -309,11 +319,13 @@ frame:SetScript("OnEvent", function()
             ProfesjonellConfig = {}
         end
         Print("Loaded.")
+        WipeDatabaseIfNoGuild()
     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
         ScanRecipes(false)
     elseif event == "CRAFT_SHOW" or event == "CRAFT_UPDATE" then
         ScanRecipes(true)
     elseif event == "PLAYER_ENTERING_WORLD" then
+        WipeDatabaseIfNoGuild()
         -- Request sync when entering world (guild info should be available)
         -- Add a simple throttle to avoid spamming on reload
         local now = GetTime()
@@ -370,6 +382,8 @@ frame:SetScript("OnEvent", function()
                 end
             end
         end
+    elseif event == "PLAYER_GUILD_UPDATE" then
+        WipeDatabaseIfNoGuild()
     elseif event == "CHAT_MSG_ADDON" and arg1 == "Profesjonell" then
         local prefix, message = arg1, arg2
         local sender = arg4
