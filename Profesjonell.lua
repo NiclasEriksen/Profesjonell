@@ -46,15 +46,31 @@ local lastRosterUpdate = 0
 
 local function UpdateGuildRosterCache()
     local now = GetTime()
+    local guildName = GetGuildName()
+    
+    -- If not in a guild, clear cache and return false
+    if not guildName then
+        guildRosterCache = {}
+        lastRosterUpdate = 0
+        return false
+    end
+
     -- Request a roster update from the server if it's been a while
     if now - lastRosterUpdate > 60 then
         GuildRoster()
     end
     
-    if now - lastRosterUpdate < 10 then return end
+    if now - lastRosterUpdate < 10 then 
+        return table.getn(guildRosterCache) > 0 or GetNumGuildMembers() > 0
+    end
     
-    guildRosterCache = {}
     local num = GetNumGuildMembers()
+    if num == 0 then
+        -- Roster not yet loaded from server
+        return false
+    end
+
+    guildRosterCache = {}
     for i = 1, num do
         local name = GetGuildRosterInfo(i)
         if name then
@@ -62,6 +78,7 @@ local function UpdateGuildRosterCache()
         end
     end
     lastRosterUpdate = now
+    return true
 end
 
 local function FindRecipeHolders(name)
@@ -73,7 +90,11 @@ local function FindRecipeHolders(name)
     cleanName = StripPrefix(cleanName)
     local searchName = string.lower(cleanName)
     
-    UpdateGuildRosterCache()
+    local rosterReady = UpdateGuildRosterCache()
+    if not rosterReady and ProfesjonellDB and next(ProfesjonellDB) then
+        Debug("Roster not ready for FindRecipeHolders, results may be incomplete.")
+    end
+    
     local found = {}
     local partialMatches = {}
     local exactMatchName = nil
@@ -87,7 +108,7 @@ local function FindRecipeHolders(name)
         
         if isExact or isPartial then
             for charName, _ in pairs(holders) do
-                if guildRosterCache[charName] then
+                if not rosterReady or guildRosterCache[charName] then
                     if isExact then
                         exactMatchName = cleanRName
                         table.insert(found, charName)
@@ -105,7 +126,12 @@ end
 
 local function IsInGuild(name)
     if not GetGuildName() then return false end
-    UpdateGuildRosterCache()
+    if not UpdateGuildRosterCache() then
+        -- If roster is not ready, we can't be sure, but let's assume false to be safe
+        -- or true to avoid clearing data? 
+        -- Actually, IsInGuild is used to filter who to share recipes with.
+        return false 
+    end
     return guildRosterCache[name] == true
 end
 
@@ -125,25 +151,53 @@ local function IsOfficer(name)
 end
 
 local function WipeDatabaseIfNoGuild()
-    if not GetGuildName() then
-        if ProfesjonellDB and next(ProfesjonellDB) then
-            ProfesjonellDB = {}
-            Print("You are no longer in a guild. The database has been wiped for security/privacy.")
+    -- Only wipe if we are CERTAIN we are not in a guild.
+    -- On login, GetGuildName() might be nil for a few seconds.
+    -- We'll check if we have a guild name, or if we are still waiting for it.
+    local guildName = GetGuildName()
+    if not guildName then
+        -- If we have no guild name, but we had one before (or this is not the first check),
+        -- we might want to wipe. But wait, WoW 1.12 might not give guild name immediately.
+        -- Let's only wipe if we are sure we've tried to get guild info and failed.
+        -- A better way: check if we are in a guild using a different method or just wait.
+        
+        -- If we are in the world and still no guild name after some time, then wipe.
+        if frame.enteredWorldTime and GetTime() - frame.enteredWorldTime > 30 then
+            if ProfesjonellDB and next(ProfesjonellDB) then
+                ProfesjonellDB = {}
+                Print("You are no longer in a guild. The database has been wiped for security/privacy.")
+            end
         end
     end
 end
 
 local function GenerateDatabaseHash()
+    -- Ensure roster is updated
     UpdateGuildRosterCache()
+    
+    local guildName = GetGuildName()
+    
     -- Create a sorted list of all recipe:char pairs to ensure deterministic hash
     local entries = {}
     for recipeName, holders in pairs(ProfesjonellDB or {}) do
         for charName, _ in pairs(holders) do
-            if guildRosterCache[charName] then
+            -- Only include characters that are actually in the guild
+            -- If we don't know the guild name yet, include everyone to be safe
+            if not guildName or guildRosterCache[charName] then
                 table.insert(entries, recipeName .. ":" .. charName)
             end
         end
     end
+    
+    if table.getn(entries) == 0 then
+        if ProfesjonellDB and next(ProfesjonellDB) then
+            -- We have recipes, but none matched the roster. 
+            -- This could be because the roster is still loading or everyone in the DB left the guild.
+            Debug("GenerateDatabaseHash: No entries found despite having data. Roster might be incomplete.")
+        end
+        return "0"
+    end
+
     table.sort(entries)
     
     local hash = 0
@@ -181,6 +235,7 @@ end
 local function BroadcastHash()
     if GetGuildName() then
         local hash = GenerateDatabaseHash()
+        -- GenerateDatabaseHash no longer returns nil
         local version = GetAddOnMetadata("Profesjonell", "Version") or "0"
         Debug("Broadcasting database hash: " .. hash .. " (v" .. version .. ")")
         SendAddonMessage("Profesjonell", "HASH:" .. hash .. ":" .. version, "GUILD")
@@ -189,13 +244,36 @@ end
 
 local recipesToShare = {}
 local sharingInProgress = false
-local function ShareAllRecipes()
+local function ShareAllRecipes(isManual)
     if sharingInProgress then 
         Debug("Sharing already in progress, skipping.")
         return 
     end
     
-    UpdateGuildRosterCache()
+    if not UpdateGuildRosterCache() then
+        Debug("Roster not ready for sharing, delaying.")
+        return
+    end
+
+    -- If not manual, add a small random delay to avoid everyone sharing at once
+    if not isManual then
+        if not frame.pendingShare or GetTime() > frame.pendingShare then
+            local playerName = GetPlayerName()
+            local playerOffset = 0
+            if playerName then
+                for i=1, string.len(playerName) do
+                    playerOffset = math.mod(playerOffset + string.byte(playerName, i), 50)
+                end
+                playerOffset = playerOffset / 100 -- 0-0.5s
+            end
+            
+            local delay = 0.5 + playerOffset + math.random() * 2
+            frame.pendingShare = GetTime() + delay
+            Debug("Sync response scheduled in " .. string.format("%.2f", delay) .. "s")
+        end
+        return
+    end
+
     -- Share all recipes from all characters in our DB
     -- We use a throttle to avoid overloading the addon channel
     recipesToShare = {}
@@ -271,6 +349,11 @@ local lastSyncRequest = 0
 local pendingReplies = {}
 local versionWarned = false
 
+-- Sync summary tracking
+local syncNewRecipesCount = 0
+local syncSources = {}
+local syncSummaryTimer = nil
+
 frame:SetScript("OnUpdate", function()
     local now = GetTime()
     if frame.broadcastHashTime and now >= frame.broadcastHashTime then
@@ -281,6 +364,27 @@ frame:SetScript("OnUpdate", function()
     if frame.syncTimer and now >= frame.syncTimer then
         RequestSync()
         frame.syncTimer = nil
+    end
+
+    if frame.pendingShare and now >= frame.pendingShare then
+        ShareAllRecipes(true) -- Call with true to actually start sharing
+        frame.pendingShare = nil
+    end
+
+    if syncSummaryTimer and now >= syncSummaryTimer then
+        local sourceList = {}
+        for name, _ in pairs(syncSources) do
+            table.insert(sourceList, name)
+        end
+        table.sort(sourceList)
+        
+        if syncNewRecipesCount > 0 then
+            Print("Sync complete: Added " .. syncNewRecipesCount .. " new recipes from " .. table.concat(sourceList, ", ") .. ".")
+        end
+        
+        syncNewRecipesCount = 0
+        syncSources = {}
+        syncSummaryTimer = nil
     end
 
     for queryKey, data in pairs(pendingReplies) do
@@ -330,13 +434,15 @@ frame:SetScript("OnEvent", function()
     elseif event == "CRAFT_SHOW" or event == "CRAFT_UPDATE" then
         ScanRecipes(true)
     elseif event == "PLAYER_ENTERING_WORLD" then
+        frame.enteredWorldTime = GetTime()
         WipeDatabaseIfNoGuild()
         -- Request sync when entering world (guild info should be available)
         -- Add a simple throttle to avoid spamming on reload
         local now = GetTime()
         if now - lastSyncRequest > 30 then
             -- Guild roster might not be immediately available, so we wait a few seconds
-            frame.broadcastHashTime = now + 5
+            -- before broadcasting our hash to ensure it's accurate.
+            frame.broadcastHashTime = now + 10
             lastSyncRequest = now
         end
     elseif event == "CHAT_MSG_GUILD" then
@@ -401,7 +507,20 @@ frame:SetScript("OnEvent", function()
                 if not ProfesjonellDB[recipeName] then
                     ProfesjonellDB[recipeName] = {}
                 end
-                ProfesjonellDB[recipeName][sender] = true
+                
+                if not ProfesjonellDB[recipeName][sender] then
+                    ProfesjonellDB[recipeName][sender] = true
+                    syncNewRecipesCount = syncNewRecipesCount + 1
+                    syncSources[sender] = true
+                    syncSummaryTimer = GetTime() + 2
+                end
+
+                -- If we see an ADD message, someone else is sharing.
+                -- Cancel our pending share to avoid double sharing.
+                if frame.pendingShare then
+                    Debug("Received ADD from " .. sender .. ". Cancelling pending sync response.")
+                    frame.pendingShare = nil
+                end
                 -- If we have a pending sync, we might not need it anymore if this ADD message
                 -- brings us up to speed.
                 if frame.syncTimer then
@@ -416,7 +535,19 @@ frame:SetScript("OnEvent", function()
                 if not ProfesjonellDB[recipeName] then
                     ProfesjonellDB[recipeName] = {}
                 end
-                ProfesjonellDB[recipeName][charName] = true
+                
+                if not ProfesjonellDB[recipeName][charName] then
+                    ProfesjonellDB[recipeName][charName] = true
+                    syncNewRecipesCount = syncNewRecipesCount + 1
+                    syncSources[sender] = true
+                    syncSummaryTimer = GetTime() + 2
+                end
+
+                -- If we see an ADD_EXT message, someone else is sharing.
+                if frame.pendingShare then
+                    Debug("Received ADD_EXT from " .. sender .. ". Cancelling pending sync response.")
+                    frame.pendingShare = nil
+                end
                 -- If we have a pending sync, we might not need it anymore
                 if frame.syncTimer then
                     Debug("Received ADD_EXT, delaying sync request.")
@@ -434,6 +565,15 @@ frame:SetScript("OnEvent", function()
                 remoteVersion = "0"
             end
 
+            -- If someone else broadcasts a hash that matches ours, cancel any pending share
+            local localHash = GenerateDatabaseHash()
+            if localHash and localHash == remoteHash then
+                if frame.pendingShare then
+                    Debug("Remote hash matches ours. Cancelling pending sync response.")
+                    frame.pendingShare = nil
+                end
+            end
+
             -- Version check
             if not versionWarned then
                 local localVersion = GetAddOnMetadata("Profesjonell", "Version") or "0"
@@ -448,7 +588,7 @@ frame:SetScript("OnEvent", function()
             end
             
             local localHash = GenerateDatabaseHash()
-            if localHash ~= remoteHash then
+            if localHash and localHash ~= remoteHash then
                 Debug("Hash mismatch! Remote: " .. remoteHash .. ", Local: " .. localHash)
                 -- If we just received an ADD/ADD_EXT message, we might have already updated our hash
                 -- but wait a bit to be sure before requesting a full sync.
@@ -462,7 +602,7 @@ frame:SetScript("OnEvent", function()
                 end
             else
                 -- If hashes match, cancel any pending sync
-                if frame.syncTimer then
+                if localHash and frame.syncTimer then
                     Debug("Hashes match, cancelling pending sync.")
                     frame.syncTimer = nil
                 end
@@ -538,6 +678,12 @@ SlashCmdList["PROFESJONELL"] = function(msg)
             local wait = math.ceil(30 - (now - lastSyncRequest))
             Print("Please wait " .. wait .. "s before syncing again.")
         end
+        return
+    end
+
+    if msg == "share" then
+        Print("Sharing your database with the guild...")
+        ShareAllRecipes(true)
         return
     end
 
@@ -639,6 +785,7 @@ SlashCmdList["PROFESJONELL"] = function(msg)
         Print("  /prof remove [name] [recipe] - Remove a recipe from a member (officers only)")
         Print("  /prof remove [name] - Remove a character from DB (officers only)")
         Print("  /prof sync - Request manual sync from guild")
+        Print("  /prof share - Share your database with the guild")
         Print("  /prof purge - Remove members no longer in guild from local DB (officers only)")
         Print("  /prof debug - Toggle debug mode")
         Print("  ?prof [recipe name/link] - Guild chat query")
@@ -647,7 +794,10 @@ SlashCmdList["PROFESJONELL"] = function(msg)
 
     if msg == "purge" then
         if IsOfficer(GetPlayerName()) then
-            UpdateGuildRosterCache()
+            if not UpdateGuildRosterCache() then
+                Print("Guild roster is not yet loaded. Please wait a few seconds and try again.")
+                return
+            end
             local charsToPurge = {}
             local charPresence = {}
             
