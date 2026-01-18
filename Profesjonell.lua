@@ -1,4 +1,5 @@
 -- Profesjonell: Guild recipe tracker for WoW 1.12
+-- Database format: ProfesjonellDB[recipeName][charName] = true
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
@@ -75,26 +76,31 @@ local function FindRecipeHolders(name)
     UpdateGuildRosterCache()
     local found = {}
     local partialMatches = {}
+    local exactMatchName = nil
     
-    for charName, recipes in pairs(ProfesjonellDB or {}) do
-        -- Only show members who are still in the guild
-        if guildRosterCache[charName] then
-            for rName, _ in pairs(recipes) do
-                local cleanRName = StripPrefix(rName)
-                local lowerRName = string.lower(cleanRName)
-                
-                if lowerRName == searchName then
-                    table.insert(found, charName)
-                    break
-                elseif string.find(lowerRName, searchName, 1, true) then
-                    if not partialMatches[cleanRName] then partialMatches[cleanRName] = {} end
-                    table.insert(partialMatches[cleanRName], charName)
+    for rName, holders in pairs(ProfesjonellDB or {}) do
+        local cleanRName = StripPrefix(rName)
+        local lowerRName = string.lower(cleanRName)
+        
+        local isExact = (lowerRName == searchName)
+        local isPartial = string.find(lowerRName, searchName, 1, true)
+        
+        if isExact or isPartial then
+            for charName, _ in pairs(holders) do
+                if guildRosterCache[charName] then
+                    if isExact then
+                        exactMatchName = cleanRName
+                        table.insert(found, charName)
+                    else
+                        if not partialMatches[cleanRName] then partialMatches[cleanRName] = {} end
+                        table.insert(partialMatches[cleanRName], charName)
+                    end
                 end
             end
         end
     end
     table.sort(found)
-    return found, cleanName, partialMatches
+    return found, (exactMatchName or cleanName), partialMatches
 end
 
 local function IsInGuild(name)
@@ -129,12 +135,12 @@ end
 
 local function GenerateDatabaseHash()
     UpdateGuildRosterCache()
-    -- Create a sorted list of all char:recipe pairs to ensure deterministic hash
+    -- Create a sorted list of all recipe:char pairs to ensure deterministic hash
     local entries = {}
-    for charName, recipes in pairs(ProfesjonellDB or {}) do
-        if guildRosterCache[charName] then
-            for recipeName, _ in pairs(recipes) do
-                table.insert(entries, charName .. ":" .. recipeName)
+    for recipeName, holders in pairs(ProfesjonellDB or {}) do
+        for charName, _ in pairs(holders) do
+            if guildRosterCache[charName] then
+                table.insert(entries, recipeName .. ":" .. charName)
             end
         end
     end
@@ -193,9 +199,9 @@ local function ShareAllRecipes()
     -- Share all recipes from all characters in our DB
     -- We use a throttle to avoid overloading the addon channel
     recipesToShare = {}
-    for charName, recipes in pairs(ProfesjonellDB or {}) do
-        if guildRosterCache[charName] then
-            for recipeName, _ in pairs(recipes) do
+    for recipeName, holders in pairs(ProfesjonellDB or {}) do
+        for charName, _ in pairs(holders) do
+            if guildRosterCache[charName] then
                 table.insert(recipesToShare, {char = charName, recipe = recipeName})
             end
         end
@@ -240,16 +246,15 @@ local function ScanRecipes(isCraft)
     end
 
     local playerName = GetPlayerName()
-    if not ProfesjonellDB[playerName] then
-        ProfesjonellDB[playerName] = {}
-    end
-
     local newCount = 0
     for i = 1, numSkills do
         local name, type = getSkillInfo(i)
         if name and type ~= "header" then
-            if not ProfesjonellDB[playerName][name] then
-                ProfesjonellDB[playerName][name] = true
+            if not ProfesjonellDB[name] then
+                ProfesjonellDB[name] = {}
+            end
+            if not ProfesjonellDB[name][playerName] then
+                ProfesjonellDB[name][playerName] = true
                 newCount = newCount + 1
                 ShareRecipe(name)
             end
@@ -298,9 +303,9 @@ frame:SetScript("OnUpdate", function()
                     table.sort(pHolders)
                     replyMsg = "Profesjonell: " .. pName .. " is known by: " .. table.concat(pHolders, ", ")
                 elseif matchCount > 1 then
-                    replyMsg = "Profesjonell: Multiple matches found for '" .. cleanName .. "'. Please be more specific."
+                    replyMsg = "Profesjonell: Multiple matches found for '" .. data.cleanName .. "'. Please be more specific."
                 else
-                    replyMsg = "Profesjonell: No one knows " .. cleanName
+                    replyMsg = "Profesjonell: No one knows " .. data.cleanName
                 end
             end
             SendChatMessage(replyMsg, "GUILD")
@@ -343,7 +348,7 @@ frame:SetScript("OnEvent", function()
             local recipe = string.sub(msg, 7)
             if recipe and recipe ~= "" then
                 Debug("Query detected from " .. sender .. ": " .. recipe)
-                local _, cleanName = FindRecipeHolders(recipe)
+                local found, cleanName = FindRecipeHolders(recipe)
                 -- Schedule a reply with a random delay to prevent multiple people from replying at once
                 local queryKey = string.lower(cleanName)
                 if not pendingReplies[queryKey] then
@@ -357,9 +362,9 @@ frame:SetScript("OnEvent", function()
                         end
                         playerOffset = playerOffset / 100
                     end
-                    
+                
                     local delay = 1.0 + playerOffset + math.random() * 2.5
-                    Debug("Scheduling reply for " .. cleanName .. " in " .. string.format("%.2f", delay) .. "s")
+                    Debug("Scheduling reply for " .. (table.getn(found) > 0 and cleanName or recipe) .. " in " .. string.format("%.2f", delay) .. "s")
                     pendingReplies[queryKey] = {
                         time = GetTime() + delay,
                         originalQuery = recipe,
@@ -393,19 +398,19 @@ frame:SetScript("OnEvent", function()
         if string.find(message, "^ADD:") then
             local recipeName = string.sub(message, 5)
             if IsInGuild(sender) then
-                if not ProfesjonellDB[sender] then
-                    ProfesjonellDB[sender] = {}
+                if not ProfesjonellDB[recipeName] then
+                    ProfesjonellDB[recipeName] = {}
                 end
-                ProfesjonellDB[sender][recipeName] = true
+                ProfesjonellDB[recipeName][sender] = true
             end
         elseif string.find(message, "^ADD_EXT:") then
             -- Format: ADD_EXT:CharacterName:RecipeName
             local _, _, charName, recipeName = string.find(message, "^ADD_EXT:([^:]+):(.+)$")
             if charName and recipeName and IsInGuild(charName) then
-                if not ProfesjonellDB[charName] then
-                    ProfesjonellDB[charName] = {}
+                if not ProfesjonellDB[recipeName] then
+                    ProfesjonellDB[recipeName] = {}
                 end
-                ProfesjonellDB[charName][recipeName] = true
+                ProfesjonellDB[recipeName][charName] = true
             end
         elseif message == "REQ_SYNC" then
             ShareAllRecipes()
@@ -445,8 +450,18 @@ frame:SetScript("OnEvent", function()
         elseif string.find(message, "^REMOVE_CHAR:") then
             local charToRemove = string.sub(message, 13)
             if IsOfficer(sender) then
-                if ProfesjonellDB[charToRemove] then
-                    ProfesjonellDB[charToRemove] = nil
+                local removedCount = 0
+                for recipeName, holders in pairs(ProfesjonellDB) do
+                    if holders[charToRemove] then
+                        holders[charToRemove] = nil
+                        removedCount = removedCount + 1
+                        -- Clean up empty recipe tables
+                        if not next(holders) then
+                            ProfesjonellDB[recipeName] = nil
+                        end
+                    end
+                end
+                if removedCount > 0 then
                     Print("Removed " .. charToRemove .. " from database as requested by " .. sender)
                 end
             else
@@ -456,10 +471,16 @@ frame:SetScript("OnEvent", function()
             -- Format: REMOVE_RECIPE:CharacterName:RecipeName
             local _, _, charName, recipeName = string.find(message, "^REMOVE_RECIPE:([^:]+):(.+)$")
             if charName and recipeName and IsOfficer(sender) then
-                if ProfesjonellDB[charName] and ProfesjonellDB[charName][recipeName] then
-                    ProfesjonellDB[charName][recipeName] = nil
-                    Print("Removed " .. recipeName .. " from " .. charName .. " as requested by " .. sender)
+                if ProfesjonellDB[recipeName] and ProfesjonellDB[recipeName][charName] then
+                    ProfesjonellDB[recipeName][charName] = nil
+                    -- Clean up empty recipe table
+                    if not next(ProfesjonellDB[recipeName]) then
+                        ProfesjonellDB[recipeName] = nil
+                    end
+                    Print("Removed recipe '" .. recipeName .. "' from " .. charName .. " as requested by " .. sender)
                 end
+            else
+                Debug("Unauthorized recipe removal request from " .. sender)
             end
         end
     end
@@ -496,12 +517,12 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                 local _, _, cleanRecipeName = string.find(recipeName, "%[(.+)%]")
                 cleanRecipeName = cleanRecipeName or recipeName
 
-                if not ProfesjonellDB[charName] then
-                    ProfesjonellDB[charName] = {}
+                if not ProfesjonellDB[cleanRecipeName] then
+                    ProfesjonellDB[cleanRecipeName] = {}
                 end
 
-                if not ProfesjonellDB[charName][cleanRecipeName] then
-                    ProfesjonellDB[charName][cleanRecipeName] = true
+                if not ProfesjonellDB[cleanRecipeName][charName] then
+                    ProfesjonellDB[cleanRecipeName][charName] = true
                     Print("Added " .. cleanRecipeName .. " to " .. charName .. " and broadcasting.")
                     
                     -- Announce to guild members using the addon
@@ -531,8 +552,12 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                 local _, _, cleanRecipeName = string.find(recipeName, "%[(.+)%]")
                 cleanRecipeName = cleanRecipeName or recipeName
 
-                if ProfesjonellDB[charName] and ProfesjonellDB[charName][cleanRecipeName] then
-                    ProfesjonellDB[charName][cleanRecipeName] = nil
+                if ProfesjonellDB[cleanRecipeName] and ProfesjonellDB[cleanRecipeName][charName] then
+                    ProfesjonellDB[cleanRecipeName][charName] = nil
+                    -- Clean up empty recipe table
+                    if not next(ProfesjonellDB[cleanRecipeName]) then
+                        ProfesjonellDB[cleanRecipeName] = nil
+                    end
                     Print("Removed " .. cleanRecipeName .. " from " .. charName .. " and broadcasting.")
                     
                     SendAddonMessage("Profesjonell", "REMOVE_RECIPE:" .. charName .. ":" .. cleanRecipeName, "GUILD")
@@ -547,8 +572,18 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                 -- If only name is provided, keep the old behavior of removing the whole character
                 local charNameOnly = string.sub(msg, 8)
                 if charNameOnly and charNameOnly ~= "" then
-                    if ProfesjonellDB[charNameOnly] then
-                        ProfesjonellDB[charNameOnly] = nil
+                    local removedCount = 0
+                    for rName, holders in pairs(ProfesjonellDB) do
+                        if holders[charNameOnly] then
+                            holders[charNameOnly] = nil
+                            removedCount = removedCount + 1
+                            if not next(holders) then
+                                ProfesjonellDB[rName] = nil
+                            end
+                        end
+                    end
+                    
+                    if removedCount > 0 then
                         Print("Removed " .. charNameOnly .. " from local database and broadcasting removal.")
                         SendAddonMessage("Profesjonell", "REMOVE_CHAR:" .. charNameOnly, "GUILD")
                     else
@@ -581,14 +616,24 @@ SlashCmdList["PROFESJONELL"] = function(msg)
     if msg == "purge" then
         if IsOfficer(GetPlayerName()) then
             UpdateGuildRosterCache()
-            local charsToRemove = {}
-            for charName, _ in pairs(ProfesjonellDB) do
-                if not guildRosterCache[charName] then
-                    table.insert(charsToRemove, charName)
+            local charsToPurge = {}
+            local charPresence = {}
+            
+            -- Find all characters in the DB
+            for _, holders in pairs(ProfesjonellDB) do
+                for charName, _ in pairs(holders) do
+                    charPresence[charName] = true
                 end
             end
             
-            local count = table.getn(charsToRemove)
+            -- Check which ones are not in guild
+            for charName, _ in pairs(charPresence) do
+                if not guildRosterCache[charName] then
+                    table.insert(charsToPurge, charName)
+                end
+            end
+            
+            local count = table.getn(charsToPurge)
             if count == 0 then
                 Print("No members to purge.")
                 return
@@ -600,8 +645,18 @@ SlashCmdList["PROFESJONELL"] = function(msg)
             purgeTimer:SetScript("OnUpdate", function()
                 local chunkCount = 0
                 while index <= count and chunkCount < 5 do
-                    local charName = charsToRemove[index]
-                    ProfesjonellDB[charName] = nil
+                    local charName = charsToPurge[index]
+                    
+                    -- Remove this character from all recipes
+                    for recipeName, holders in pairs(ProfesjonellDB) do
+                        if holders[charName] then
+                            holders[charName] = nil
+                            if not next(holders) then
+                                ProfesjonellDB[recipeName] = nil
+                            end
+                        end
+                    end
+                    
                     SendAddonMessage("Profesjonell", "REMOVE_CHAR:" .. charName, "GUILD")
                     index = index + 1
                     chunkCount = chunkCount + 1
