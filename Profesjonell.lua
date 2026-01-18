@@ -133,8 +133,9 @@ end
 local function BroadcastHash()
     if GetGuildName() then
         local hash = GenerateDatabaseHash()
-        Debug("Broadcasting database hash: " .. hash)
-        SendAddonMessage("Profesjonell", "HASH:" .. hash, "GUILD")
+        local version = GetAddOnMetadata("Profesjonell", "Version") or "0"
+        Debug("Broadcasting database hash: " .. hash .. " (v" .. version .. ")")
+        SendAddonMessage("Profesjonell", "HASH:" .. hash .. ":" .. version, "GUILD")
     end
 end
 
@@ -213,6 +214,7 @@ end
 
 local lastSyncRequest = 0
 local pendingReplies = {}
+local versionWarned = false
 
 frame:SetScript("OnUpdate", function()
     local now = GetTime()
@@ -334,7 +336,27 @@ frame:SetScript("OnEvent", function()
         elseif message == "REQ_SYNC" then
             ShareAllRecipes()
         elseif string.find(message, "^HASH:") then
-            local remoteHash = string.sub(message, 6)
+            local _, _, remoteHash, remoteVersion = string.find(message, "^HASH:([^:]+):(.+)$")
+            
+            -- Fallback for older versions that only sent HASH:hash
+            if not remoteHash then
+                remoteHash = string.sub(message, 6)
+                remoteVersion = "0"
+            end
+
+            -- Version check
+            if not versionWarned then
+                local localVersion = GetAddOnMetadata("Profesjonell", "Version") or "0"
+                if remoteVersion > localVersion then
+                    Print("|cffff0000Warning:|r A newer version of Profesjonell (v" .. remoteVersion .. ") is available! Please update.")
+                    versionWarned = true
+                elseif remoteVersion < localVersion and remoteVersion ~= "0" then
+                    -- If we have a newer version, broadcast it back once so they get the warning
+                    frame.broadcastHashTime = GetTime() + 1
+                    versionWarned = true -- Set to true so we don't keep doing this
+                end
+            end
+
             local localHash = GenerateDatabaseHash()
             if remoteHash ~= localHash then
                 Debug("Hash mismatch! Remote: " .. remoteHash .. ", Local: " .. localHash)
@@ -383,6 +405,41 @@ SlashCmdList["PROFESJONELL"] = function(msg)
         return
     end
 
+    if string.find(msg, "^add ") then
+        if IsOfficer(GetPlayerName()) then
+            local _, _, charName, recipeName = string.find(msg, "^add ([^%s]+) (.+)$")
+            if charName and recipeName then
+                -- Extract name from item link if possible
+                local _, _, cleanRecipeName = string.find(recipeName, "%[(.+)%]")
+                cleanRecipeName = cleanRecipeName or recipeName
+
+                if not ProfesjonellDB[charName] then
+                    ProfesjonellDB[charName] = {}
+                end
+
+                if not ProfesjonellDB[charName][cleanRecipeName] then
+                    ProfesjonellDB[charName][cleanRecipeName] = true
+                    Print("Added " .. cleanRecipeName .. " to " .. charName .. " and broadcasting.")
+                    
+                    -- Announce to guild members using the addon
+                    ShareRecipe(cleanRecipeName, charName)
+                    
+                    -- Announce to the guild chat as requested
+                    if GetGuildName() then
+                        SendChatMessage("Profesjonell: Added " .. cleanRecipeName .. " to " .. charName, "GUILD")
+                    end
+                else
+                    Print(charName .. " already has " .. cleanRecipeName .. " in the database.")
+                end
+            else
+                Print("Usage: /prof add [name] [recipe]")
+            end
+        else
+            Print("Only officers can add recipes to guild members.")
+        end
+        return
+    end
+
     if string.find(msg, "^remove ") then
         local charName = string.sub(msg, 8)
         if charName and charName ~= "" then
@@ -403,11 +460,14 @@ SlashCmdList["PROFESJONELL"] = function(msg)
         return
     end
 
-    if not msg or msg == "" then
-        Print("Usage: /prof [item link] or ?prof [item link] in guild chat")
-        Print("Manual sync: /prof sync")
-        Print("Remove character: /prof remove [name] (Officers only)")
-        Print("Toggle debug: /prof debug")
+    if not msg or msg == "" or msg == "help" then
+        Print("Available commands:")
+        Print("  /prof [recipe name/link] - Search for who knows a recipe")
+        Print("  /prof add [name] [recipe] - Add recipe to a member (officers only)")
+        Print("  /prof remove [name] - Remove a character from DB (officers only)")
+        Print("  /prof sync - Request manual sync from guild")
+        Print("  /prof debug - Toggle debug mode")
+        Print("  ?prof [recipe name/link] - Guild chat query")
         return
     end
 
