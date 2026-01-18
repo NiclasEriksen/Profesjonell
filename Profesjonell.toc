@@ -1,8 +1,8 @@
 ## Interface: 11200
 ## Title: Profesjonell
-## Notes: Gathers all the recipes a character has and exports it to CSV, and syncs it between guild members.
+## Notes: Gathers all the recipes a character has and syncs it between guild members.
 ## Author: Hjelp+Junie
-## Version: 2.2
+## Version: 2.3
 ## SavedVariables: ProfesjonellDB, ProfesjonellConfig
 
 Profesjonell.lua
