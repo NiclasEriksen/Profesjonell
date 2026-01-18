@@ -3,7 +3,9 @@
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("TRADE_SKILL_SHOW")
+frame:RegisterEvent("TRADE_SKILL_UPDATE")
 frame:RegisterEvent("CRAFT_SHOW")
+frame:RegisterEvent("CRAFT_UPDATE")
 frame:RegisterEvent("CHAT_MSG_ADDON")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("CHAT_MSG_GUILD")
@@ -37,11 +39,37 @@ local function StripPrefix(s)
     return s
 end
 
+local guildRosterCache = {}
+local lastRosterUpdate = 0
+
+local function UpdateGuildRosterCache()
+    local now = GetTime()
+    -- Request a roster update from the server if it's been a while
+    if now - lastRosterUpdate > 60 then
+        GuildRoster()
+    end
+    
+    if now - lastRosterUpdate < 10 then return end
+    
+    guildRosterCache = {}
+    local num = GetNumGuildMembers()
+    for i = 1, num do
+        local name = GetGuildRosterInfo(i)
+        if name then
+            guildRosterCache[name] = true
+        end
+    end
+    lastRosterUpdate = now
+end
+
 local function FindRecipeHolders(name)
     -- Extract name from item link if possible
     local _, _, cleanName = string.find(name, "%[(.+)%]")
     cleanName = cleanName or name
-    local searchName = string.lower(StripPrefix(cleanName))
+    
+    -- IMPORTANT: Strip prefixes before returning cleanName to ensure consistency
+    cleanName = StripPrefix(cleanName)
+    local searchName = string.lower(cleanName)
     
     UpdateGuildRosterCache()
     local found = {}
@@ -66,29 +94,6 @@ local function FindRecipeHolders(name)
     end
     table.sort(found)
     return found, cleanName, partialMatches
-end
-
-local guildRosterCache = {}
-local lastRosterUpdate = 0
-
-local function UpdateGuildRosterCache()
-    local now = GetTime()
-    -- Request a roster update from the server if it's been a while
-    if now - lastRosterUpdate > 60 then
-        GuildRoster()
-    end
-    
-    if now - lastRosterUpdate < 10 then return end
-    
-    guildRosterCache = {}
-    local num = GetNumGuildMembers()
-    for i = 1, num do
-        local name = GetGuildRosterInfo(i)
-        if name then
-            guildRosterCache[name] = true
-        end
-    end
-    lastRosterUpdate = now
 end
 
 local function IsInGuild(name)
@@ -243,6 +248,7 @@ local function ScanRecipes(isCraft)
 
     if newCount > 0 then
         Print("Found " .. newCount .. " new recipes!")
+        BroadcastHash()
     end
 end
 
@@ -262,9 +268,9 @@ frame:SetScript("OnUpdate", function()
         frame.syncTimer = nil
     end
 
-    for cleanName, data in pairs(pendingReplies) do
+    for queryKey, data in pairs(pendingReplies) do
         if now >= data.time then
-            local found, _, partialMatches = FindRecipeHolders(data.originalQuery)
+            local found, cleanName, partialMatches = FindRecipeHolders(data.originalQuery)
             local replyMsg
             if table.getn(found) > 0 then
                 replyMsg = "Profesjonell: " .. cleanName .. " is known by: " .. table.concat(found, ", ")
@@ -289,7 +295,7 @@ frame:SetScript("OnUpdate", function()
             end
             SendChatMessage(replyMsg, "GUILD")
             Debug("Sent reply: " .. replyMsg)
-            pendingReplies[cleanName] = nil
+            pendingReplies[queryKey] = nil
         end
     end
 end)
@@ -303,9 +309,9 @@ frame:SetScript("OnEvent", function()
             ProfesjonellConfig = {}
         end
         Print("Loaded.")
-    elseif event == "TRADE_SKILL_SHOW" then
+    elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
         ScanRecipes(false)
-    elseif event == "CRAFT_SHOW" then
+    elseif event == "CRAFT_SHOW" or event == "CRAFT_UPDATE" then
         ScanRecipes(true)
     elseif event == "PLAYER_ENTERING_WORLD" then
         -- Request sync when entering world (guild info should be available)
@@ -327,7 +333,8 @@ frame:SetScript("OnEvent", function()
                 Debug("Query detected from " .. sender .. ": " .. recipe)
                 local _, cleanName = FindRecipeHolders(recipe)
                 -- Schedule a reply with a random delay to prevent multiple people from replying at once
-                if not pendingReplies[cleanName] then
+                local queryKey = string.lower(cleanName)
+                if not pendingReplies[queryKey] then
                     -- Use player name to create a consistent but different base delay for each player
                     local playerName = GetPlayerName()
                     local playerOffset = 0
@@ -339,11 +346,12 @@ frame:SetScript("OnEvent", function()
                         playerOffset = playerOffset / 100
                     end
                     
-                    local delay = 0.5 + playerOffset + math.random() * 1.5
+                    local delay = 1.0 + playerOffset + math.random() * 2.5
                     Debug("Scheduling reply for " .. cleanName .. " in " .. string.format("%.2f", delay) .. "s")
-                    pendingReplies[cleanName] = {
+                    pendingReplies[queryKey] = {
                         time = GetTime() + delay,
-                        originalQuery = recipe
+                        originalQuery = recipe,
+                        cleanName = cleanName
                     }
                 else
                     Debug("Reply already pending for " .. cleanName)
@@ -352,11 +360,13 @@ frame:SetScript("OnEvent", function()
         -- Detect other addon's reply to prevent spam
         elseif string.find(msg, "^Profesjonell: ") then
             -- If someone else replied about a recipe, cancel our pending reply for it
-            for cleanName, data in pairs(pendingReplies) do
-                -- Simple check if the reply contains the recipe name
-                if string.find(msg, cleanName, 1, true) then
-                    Debug("Detected other player's reply for " .. cleanName .. ". Cancelling pending reply.")
-                    pendingReplies[cleanName] = nil
+            local lowerMsg = string.lower(msg)
+            for queryKey, data in pairs(pendingReplies) do
+                -- Simple check if the reply contains the recipe name (case-insensitive)
+                -- queryKey is already lowercase
+                if string.find(lowerMsg, queryKey, 1, true) then
+                    Debug("Detected other player's reply for " .. queryKey .. ". Cancelling pending reply.")
+                    pendingReplies[queryKey] = nil
                 end
             end
         end
