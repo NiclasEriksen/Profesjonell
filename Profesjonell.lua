@@ -402,6 +402,12 @@ frame:SetScript("OnEvent", function()
                     ProfesjonellDB[recipeName] = {}
                 end
                 ProfesjonellDB[recipeName][sender] = true
+                -- If we have a pending sync, we might not need it anymore if this ADD message
+                -- brings us up to speed.
+                if frame.syncTimer then
+                    Debug("Received ADD, delaying sync request to see if hash matches now.")
+                    frame.syncTimer = GetTime() + 2 + math.random() * 3
+                end
             end
         elseif string.find(message, "^ADD_EXT:") then
             -- Format: ADD_EXT:CharacterName:RecipeName
@@ -411,6 +417,11 @@ frame:SetScript("OnEvent", function()
                     ProfesjonellDB[recipeName] = {}
                 end
                 ProfesjonellDB[recipeName][charName] = true
+                -- If we have a pending sync, we might not need it anymore
+                if frame.syncTimer then
+                    Debug("Received ADD_EXT, delaying sync request.")
+                    frame.syncTimer = GetTime() + 2 + math.random() * 3
+                end
             end
         elseif message == "REQ_SYNC" then
             ShareAllRecipes()
@@ -435,16 +446,25 @@ frame:SetScript("OnEvent", function()
                     versionWarned = true -- Set to true so we don't keep doing this
                 end
             end
-
+            
             local localHash = GenerateDatabaseHash()
-            if remoteHash ~= localHash then
+            if localHash ~= remoteHash then
                 Debug("Hash mismatch! Remote: " .. remoteHash .. ", Local: " .. localHash)
+                -- If we just received an ADD/ADD_EXT message, we might have already updated our hash
+                -- but wait a bit to be sure before requesting a full sync.
+                
                 -- Delay request to avoid multiple people requesting at once
                 local delay = 2 + math.random() * 5
                 if not frame.syncTimer or GetTime() > frame.syncTimer then
                     frame.syncTimer = GetTime() + delay
                     -- Timer handled in OnUpdate
                     Debug("Sync scheduled in " .. string.format("%.2f", delay) .. "s")
+                end
+            else
+                -- If hashes match, cancel any pending sync
+                if frame.syncTimer then
+                    Debug("Hashes match, cancelling pending sync.")
+                    frame.syncTimer = nil
                 end
             end
         elseif string.find(message, "^REMOVE_CHAR:") then
@@ -463,6 +483,12 @@ frame:SetScript("OnEvent", function()
                 end
                 if removedCount > 0 then
                     Print("Removed " .. charToRemove .. " from database as requested by " .. sender)
+                    
+                    -- Delay sync request if one was pending
+                    if frame.syncTimer then
+                        Debug("Received REMOVE_CHAR, delaying sync request.")
+                        frame.syncTimer = GetTime() + 2 + math.random() * 3
+                    end
                 end
             else
                 Debug("Unauthorized removal request for " .. charToRemove .. " from " .. sender)
@@ -470,7 +496,7 @@ frame:SetScript("OnEvent", function()
         elseif string.find(message, "^REMOVE_RECIPE:") then
             -- Format: REMOVE_RECIPE:CharacterName:RecipeName
             local _, _, charName, recipeName = string.find(message, "^REMOVE_RECIPE:([^:]+):(.+)$")
-            if charName and recipeName and IsOfficer(sender) then
+            if IsOfficer(sender) then
                 if ProfesjonellDB[recipeName] and ProfesjonellDB[recipeName][charName] then
                     ProfesjonellDB[recipeName][charName] = nil
                     -- Clean up empty recipe table
@@ -478,6 +504,12 @@ frame:SetScript("OnEvent", function()
                         ProfesjonellDB[recipeName] = nil
                     end
                     Print("Removed recipe '" .. recipeName .. "' from " .. charName .. " as requested by " .. sender)
+                    
+                    -- Delay sync request if one was pending
+                    if frame.syncTimer then
+                        Debug("Received REMOVE_RECIPE, delaying sync request.")
+                        frame.syncTimer = GetTime() + 2 + math.random() * 3
+                    end
                 end
             else
                 Debug("Unauthorized recipe removal request from " .. sender)
