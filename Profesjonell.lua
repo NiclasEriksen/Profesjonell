@@ -341,7 +341,8 @@ local function ScanRecipes(isCraft)
 
     if newCount > 0 then
         Print("Found " .. newCount .. " new recipes!")
-        BroadcastHash()
+        -- Delay hash broadcast to let others process the ADD messages first
+        frame.broadcastHashTime = GetTime() + 10
     end
 end
 
@@ -513,6 +514,16 @@ frame:SetScript("OnEvent", function()
                     syncNewRecipesCount = syncNewRecipesCount + 1
                     syncSources[sender] = true
                     syncSummaryTimer = GetTime() + 2
+                    
+                    -- Check if our hash now matches a previously mismatched hash
+                    if frame.syncTimer and frame.lastRemoteHash then
+                        local localHash = GenerateDatabaseHash()
+                        if localHash == frame.lastRemoteHash then
+                            Debug("Incremental update resolved hash mismatch. Cancelling sync request.")
+                            frame.syncTimer = nil
+                            frame.lastRemoteHash = nil
+                        end
+                    end
                 end
 
                 -- If we see an ADD message, someone else is sharing.
@@ -541,6 +552,16 @@ frame:SetScript("OnEvent", function()
                     syncNewRecipesCount = syncNewRecipesCount + 1
                     syncSources[sender] = true
                     syncSummaryTimer = GetTime() + 2
+                    
+                    -- Check if our hash now matches a previously mismatched hash
+                    if frame.syncTimer and frame.lastRemoteHash then
+                        local localHash = GenerateDatabaseHash()
+                        if localHash == frame.lastRemoteHash then
+                            Debug("Incremental update resolved hash mismatch. Cancelling sync request.")
+                            frame.syncTimer = nil
+                            frame.lastRemoteHash = nil
+                        end
+                    end
                 end
 
                 -- If we see an ADD_EXT message, someone else is sharing.
@@ -590,11 +611,11 @@ frame:SetScript("OnEvent", function()
             local localHash = GenerateDatabaseHash()
             if localHash and localHash ~= remoteHash then
                 Debug("Hash mismatch! Remote: " .. remoteHash .. ", Local: " .. localHash)
-                -- If we just received an ADD/ADD_EXT message, we might have already updated our hash
-                -- but wait a bit to be sure before requesting a full sync.
+                frame.lastRemoteHash = remoteHash
                 
                 -- Delay request to avoid multiple people requesting at once
-                local delay = 2 + math.random() * 5
+                -- Also gives time for incremental ADD messages to arrive if they haven't yet
+                local delay = 10 + math.random() * 10
                 if not frame.syncTimer or GetTime() > frame.syncTimer then
                     frame.syncTimer = GetTime() + delay
                     -- Timer handled in OnUpdate
@@ -602,9 +623,10 @@ frame:SetScript("OnEvent", function()
                 end
             else
                 -- If hashes match, cancel any pending sync
-                if localHash and frame.syncTimer then
+                if localHash and (frame.syncTimer or frame.lastRemoteHash == remoteHash) then
                     Debug("Hashes match, cancelling pending sync.")
                     frame.syncTimer = nil
+                    frame.lastRemoteHash = nil
                 end
             end
         elseif string.find(message, "^REMOVE_CHAR:") then
