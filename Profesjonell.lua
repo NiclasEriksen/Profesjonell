@@ -57,13 +57,16 @@ local function UpdateGuildRosterCache()
 
     -- Request a roster update from the server if it's been a while
     if now - lastRosterUpdate > 60 then
+        SetGuildRosterShowOffline(1)
         GuildRoster()
     end
     
     if now - lastRosterUpdate < 10 then 
+        SetGuildRosterShowOffline(1)
         return table.getn(guildRosterCache) > 0 or GetNumGuildMembers() > 0
     end
     
+    SetGuildRosterShowOffline(1)
     local num = GetNumGuildMembers()
     if num == 0 then
         -- Roster not yet loaded from server
@@ -139,6 +142,7 @@ local function IsOfficer(name)
     if not GetGuildName() then return false end
     -- We can't easily cache rank without making the cache more complex, 
     -- but we can at least avoid calling it for every single message.
+    SetGuildRosterShowOffline(1)
     for i = 1, GetNumGuildMembers() do
         local gName, rank, rankIndex = GetGuildRosterInfo(i)
         if gName == name then
