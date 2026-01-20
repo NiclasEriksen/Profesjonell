@@ -40,9 +40,9 @@ function Profesjonell.UpdateGuildRosterCache()
 
     Profesjonell.GuildRosterCache = {}
     for i = 1, num do
-        local name = GetGuildRosterInfo(i)
+        local name, _, _, _, class = GetGuildRosterInfo(i)
         if name then
-            Profesjonell.GuildRosterCache[name] = true
+            Profesjonell.GuildRosterCache[name] = class
         end
     end
 
@@ -53,7 +53,7 @@ end
 function Profesjonell.IsInGuild(name)
     if not Profesjonell.GetGuildName() then return false end
     Profesjonell.UpdateGuildRosterCache()
-    return Profesjonell.GuildRosterCache[name] == true
+    return Profesjonell.GuildRosterCache[name] ~= nil
 end
 
 function Profesjonell.IsOfficer(name)

@@ -34,7 +34,7 @@ function Profesjonell.OnUpdate()
         table.sort(sourceList)
         
         if Profesjonell.SyncNewRecipesCount > 0 then
-            Profesjonell.Print("Sync complete: Added " .. Profesjonell.SyncNewRecipesCount .. " new recipes from " .. table.concat(sourceList, ", ") .. ".")
+            Profesjonell.Print("Sync complete: Added " .. Profesjonell.SyncNewRecipesCount .. " new recipes from " .. table.concat(Profesjonell.ColorizeList(sourceList), ", ") .. ".")
         end
         
         Profesjonell.SyncNewRecipesCount = 0
@@ -44,7 +44,7 @@ function Profesjonell.OnUpdate()
 
     for queryKey, data in pairs(Profesjonell.PendingReplies) do
         if now >= data.time then
-            local found, cleanName, partialMatches = Profesjonell.FindRecipeHolders(data.originalQuery)
+            local found, cleanName, partialMatches, exactMatchLink, partialLinks = Profesjonell.FindRecipeHolders(data.originalQuery)
             local replyMsg
             local matchCount = 0
             if table.getn(found) > 0 then
@@ -58,15 +58,16 @@ function Profesjonell.OnUpdate()
                 replyMsg = "Profesjonell: Multiple matches found for '" .. data.cleanName .. "'. Please be more specific."
             elseif matchCount == 1 then
                 if table.getn(found) > 0 then
-                    replyMsg = "Profesjonell: " .. cleanName .. " is known by: " .. table.concat(found, ", ")
+                    replyMsg = "Profesjonell: " .. (exactMatchLink or cleanName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(found), ", ")
                 else
-                    local pName, pHolders
+                    local pName, pHolders, pLink
                     for name, holders in pairs(partialMatches) do
                         pName = name
                         pHolders = holders
+                        pLink = partialLinks[name]
                     end
                     table.sort(pHolders)
-                    replyMsg = "Profesjonell: " .. pName .. " is known by: " .. table.concat(pHolders, ", ")
+                    replyMsg = "Profesjonell: " .. (pLink or pName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(pHolders), ", ")
                 end
             else
                 replyMsg = "Profesjonell: No one knows " .. data.cleanName
@@ -93,8 +94,13 @@ function Profesjonell.OnGuildChat(msg, sender)
         local recipe = string.sub(msg, 7)
         if recipe and recipe ~= "" then
             Profesjonell.Debug("Query detected from " .. sender .. ": " .. recipe)
-            local _, cleanName = Profesjonell.FindRecipeHolders(recipe)
-            local queryKey = string.lower(cleanName)
+            
+            -- Use the input name as queryKey to ensure consistency between clients,
+            -- regardless of local database state or tooltip loading status.
+            local inputCleanName = Profesjonell.GetItemNameFromLink(recipe)
+            inputCleanName = Profesjonell.StripPrefix(inputCleanName)
+            local queryKey = string.lower(inputCleanName)
+            
             if not Profesjonell.PendingReplies[queryKey] then
                 local playerName = Profesjonell.GetPlayerName()
                 local playerOffset = 0
@@ -109,7 +115,7 @@ function Profesjonell.OnGuildChat(msg, sender)
                 Profesjonell.PendingReplies[queryKey] = {
                     time = GetTime() + delay,
                     originalQuery = recipe,
-                    cleanName = cleanName
+                    cleanName = inputCleanName
                 }
             end
         end
@@ -154,20 +160,28 @@ SlashCmdList["PROFESJONELL"] = function(msg)
 
     if string.find(msg, "^add ") then
         if Profesjonell.IsOfficer(Profesjonell.GetPlayerName()) then
-            local _, _, charName, recipeName = string.find(msg, "^add ([^%s]+) (.+)$")
-            if charName and recipeName then
-                local cleanRecipeName = Profesjonell.GetItemNameFromLink(recipeName)
-                if not ProfesjonellDB[cleanRecipeName] then ProfesjonellDB[cleanRecipeName] = {} end
+            local _, _, charName, recipeLink = string.find(msg, "^add ([^%s]+) (.+)$")
+            if charName and recipeLink then
+                local id = Profesjonell.GetIDFromLink(recipeLink)
+                if not id then
+                    Profesjonell.Print("Error: Could not extract item/spell ID from link. Only links are supported for adding recipes.")
+                    return
+                end
 
-                if not ProfesjonellDB[cleanRecipeName][charName] then
-                    ProfesjonellDB[cleanRecipeName][charName] = true
-                    Profesjonell.Print("Added " .. cleanRecipeName .. " to " .. charName .. " and broadcasting.")
-                    Profesjonell.ShareRecipe(cleanRecipeName, charName)
+                local cleanRecipeName = Profesjonell.GetItemNameFromLink(recipeLink)
+                local key = id
+                
+                if not ProfesjonellDB[key] then ProfesjonellDB[key] = {} end
+
+                if not ProfesjonellDB[key][charName] then
+                    ProfesjonellDB[key][charName] = true
+                    Profesjonell.Print("Added " .. (cleanRecipeName or key) .. " to " .. Profesjonell.ColorizeName(charName) .. " and broadcasting.")
+                    Profesjonell.ShareRecipes(charName, {key})
                     if Profesjonell.GetGuildName() then
-                        SendChatMessage("Profesjonell: Added " .. cleanRecipeName .. " to " .. charName, "GUILD")
+                        SendChatMessage("Profesjonell: Added " .. (cleanRecipeName or key) .. " to " .. charName, "GUILD")
                     end
                 else
-                    Profesjonell.Print(charName .. " already has " .. cleanRecipeName .. " in the database.")
+                    Profesjonell.Print(Profesjonell.ColorizeName(charName) .. " already has " .. (cleanRecipeName or key) .. " in the database.")
                 end
             else
                 Profesjonell.Print("Usage: /prof add [name] [recipe]")
@@ -180,19 +194,27 @@ SlashCmdList["PROFESJONELL"] = function(msg)
 
     if string.find(msg, "^remove ") then
         if Profesjonell.IsOfficer(Profesjonell.GetPlayerName()) then
-            local _, _, charName, recipeName = string.find(msg, "^remove ([^%s]+) (.+)$")
-            if charName and recipeName then
-                local cleanRecipeName = Profesjonell.GetItemNameFromLink(recipeName)
-                if ProfesjonellDB[cleanRecipeName] and ProfesjonellDB[cleanRecipeName][charName] then
-                    ProfesjonellDB[cleanRecipeName][charName] = nil
-                    if not next(ProfesjonellDB[cleanRecipeName]) then ProfesjonellDB[cleanRecipeName] = nil end
-                    Profesjonell.Print("Removed " .. cleanRecipeName .. " from " .. charName .. " and broadcasting.")
-                    SendAddonMessage(Profesjonell.Name, "REMOVE_RECIPE:" .. charName .. ":" .. cleanRecipeName, "GUILD")
+            local _, _, charName, recipeLink = string.find(msg, "^remove ([^%s]+) (.+)$")
+            if charName and recipeLink then
+                local id = Profesjonell.GetIDFromLink(recipeLink)
+                if not id then
+                    Profesjonell.Print("Error: Could not extract item/spell ID from link. Only links are supported for removing specific recipes.")
+                    return
+                end
+
+                local cleanRecipeName = Profesjonell.GetItemNameFromLink(recipeLink)
+                local key = id
+                
+                if ProfesjonellDB[key] and ProfesjonellDB[key][charName] then
+                    ProfesjonellDB[key][charName] = nil
+                    if not next(ProfesjonellDB[key]) then ProfesjonellDB[key] = nil end
+                    Profesjonell.Print("Removed " .. (cleanRecipeName or key) .. " from " .. Profesjonell.ColorizeName(charName) .. " and broadcasting.")
+                    SendAddonMessage(Profesjonell.Name, "REMOVE_RECIPE:" .. charName .. ":" .. key, "GUILD")
                     if Profesjonell.GetGuildName() then
-                        SendChatMessage("Profesjonell: Removed " .. cleanRecipeName .. " from " .. charName, "GUILD")
+                        SendChatMessage("Profesjonell: Removed " .. (cleanRecipeName or key) .. " from " .. charName, "GUILD")
                     end
                 else
-                    Profesjonell.Print(charName .. " does not have " .. (cleanRecipeName or "this recipe") .. " in the database.")
+                    Profesjonell.Print(Profesjonell.ColorizeName(charName) .. " does not have " .. (cleanRecipeName or key) .. " in the database.")
                 end
             else
                 local charNameOnly = string.sub(msg, 8)
@@ -206,10 +228,10 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                         end
                     end
                     if removedCount > 0 then
-                        Profesjonell.Print("Removed " .. charNameOnly .. " from local database and broadcasting.")
+                        Profesjonell.Print("Removed " .. Profesjonell.ColorizeName(charNameOnly) .. " from local database and broadcasting.")
                         SendAddonMessage(Profesjonell.Name, "REMOVE_CHAR:" .. charNameOnly, "GUILD")
                     else
-                        Profesjonell.Print("Character " .. charNameOnly .. " not found.")
+                        Profesjonell.Print("Character " .. Profesjonell.ColorizeName(charNameOnly) .. " not found.")
                     end
                 else
                     Profesjonell.Print("Usage: /prof remove [name] [recipe] or /prof remove [name]")
@@ -276,17 +298,18 @@ SlashCmdList["PROFESJONELL"] = function(msg)
     end
 
     if msg and msg ~= "" and msg ~= "help" then
-        local found, cleanName, partialMatches = Profesjonell.FindRecipeHolders(msg)
+        local found, cleanName, partialMatches, exactMatchLink, partialLinks = Profesjonell.FindRecipeHolders(msg)
         if table.getn(found) > 0 then
-            Profesjonell.Print(cleanName .. " is known by: " .. table.concat(found, ", "))
+            Profesjonell.Print((exactMatchLink or cleanName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(found), ", "))
         else
             local matchCount = 0
             for _ in pairs(partialMatches) do matchCount = matchCount + 1 end
             
             if matchCount == 1 then
                 local pName, pHolders = next(partialMatches)
+                local pLink = partialLinks[pName]
                 table.sort(pHolders)
-                Profesjonell.Print(pName .. " is known by: " .. table.concat(pHolders, ", "))
+                Profesjonell.Print((pLink or pName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(pHolders), ", "))
             elseif matchCount > 1 then
                 Profesjonell.Print("Multiple matches found for '" .. msg .. "':")
                 local sortedNames = {}
@@ -294,8 +317,9 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                 table.sort(sortedNames)
                 for _, pName in ipairs(sortedNames) do
                     local pHolders = partialMatches[pName]
+                    local pLink = partialLinks[pName]
                     table.sort(pHolders)
-                    Profesjonell.Print("  " .. pName .. " is known by: " .. table.concat(pHolders, ", "))
+                    Profesjonell.Print("  " .. (pLink or pName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(pHolders), ", "))
                 end
             else
                 Profesjonell.Print("No one knows " .. msg)

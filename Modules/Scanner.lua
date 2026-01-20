@@ -10,33 +10,59 @@ end
 function Profesjonell.ScanRecipes(isCraft)
     local numSkills
     local getSkillInfo
+    local getLink
+    local getRecipeLink
     
     if isCraft then
         numSkills = GetNumCrafts()
         getSkillInfo = GetCraftInfo
+        getLink = GetCraftItemLink
+        getRecipeLink = GetCraftRecipeLink or function() return nil end
     else
         numSkills = GetNumTradeSkills()
         getSkillInfo = GetTradeSkillInfo
+        getLink = GetTradeSkillItemLink
+        getRecipeLink = GetTradeSkillRecipeLink or function() return nil end
     end
 
     local playerName = Profesjonell.GetPlayerName()
     local newCount = 0
+    local newKeys = {}
     for i = 1, numSkills do
         local name, type = getSkillInfo(i)
         if name and type ~= "header" then
-            if not ProfesjonellDB[name] then
-                ProfesjonellDB[name] = {}
-            end
-            if not ProfesjonellDB[name][playerName] then
-                ProfesjonellDB[name][playerName] = true
-                newCount = newCount + 1
-                Profesjonell.ShareRecipe(name, playerName)
+            -- Prefer recipe link (spell ID) for better searchability (e.g. "Transmute: X")
+            -- Fall back to item link if recipe link is not available
+            local link = getRecipeLink(i) or getLink(i)
+            local id = Profesjonell.GetIDFromLink(link)
+            
+            if id then
+                -- Use ID as primary key
+                local key = id
+                
+                -- Cleanup legacy name-based entry for the player
+                if ProfesjonellDB[name] and ProfesjonellDB[name][playerName] then
+                    ProfesjonellDB[name][playerName] = nil
+                    if not next(ProfesjonellDB[name]) then ProfesjonellDB[name] = nil end
+                end
+                
+                if not ProfesjonellDB[key] then
+                    ProfesjonellDB[key] = {}
+                end
+                if not ProfesjonellDB[key][playerName] then
+                    ProfesjonellDB[key][playerName] = true
+                    newCount = newCount + 1
+                    table.insert(newKeys, key)
+                end
+            else
+                Profesjonell.Debug("Skipping recipe '" .. name .. "' - no ID found. Link: " .. (link or "nil"))
             end
         end
     end
 
     if newCount > 0 then
         Profesjonell.Print("Found " .. newCount .. " new recipes!")
+        Profesjonell.ShareRecipes(playerName, newKeys)
         Profesjonell.Frame.broadcastHashTime = GetTime() + 10
     end
 end

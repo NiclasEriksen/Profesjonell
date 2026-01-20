@@ -4,7 +4,7 @@
 Profesjonell = Profesjonell or {}
 
 if Profesjonell.GetAddOnMetadata then
-    Profesjonell.Version = Profesjonell.GetAddOnMetadata("Profesjonell", "Version") or "0.19"
+    Profesjonell.Version = Profesjonell.GetAddOnMetadata("Profesjonell", "Version") or "0.27"
 end
 
 if Profesjonell.Log then
@@ -35,6 +35,15 @@ frame:SetScript("OnEvent", function()
         if not ProfesjonellDB then ProfesjonellDB = {} end
         if not ProfesjonellConfig then ProfesjonellConfig = {} end
         Profesjonell.Print(Profesjonell.Version .. " loaded.")
+
+        -- Migration check
+        if not ProfesjonellConfig.version or ProfesjonellConfig.version < "0.27" then
+            if Profesjonell.MigrateDatabase then
+                Profesjonell.MigrateDatabase()
+            end
+            ProfesjonellConfig.version = "0.27"
+        end
+
         if Profesjonell.WipeDatabaseIfNoGuild then
             Profesjonell.WipeDatabaseIfNoGuild()
         end
