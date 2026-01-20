@@ -167,6 +167,17 @@ function Profesjonell.OnAddonMessage(message, sender)
                     if string.find(id, "^%a+:%d+$") then
                         if not ProfesjonellDB[id] then ProfesjonellDB[id] = {} end
                         if not ProfesjonellDB[id][charName] then
+                            -- Cleanup legacy name-based entry if it exists for this character
+                            local recipeName = Profesjonell.GetNameFromKey(id)
+                            if recipeName and not string.find(recipeName, "^Unknown") then
+                                if ProfesjonellDB[recipeName] and ProfesjonellDB[recipeName][charName] then
+                                    ProfesjonellDB[recipeName][charName] = nil
+                                    if not next(ProfesjonellDB[recipeName]) then
+                                        ProfesjonellDB[recipeName] = nil
+                                    end
+                                end
+                            end
+
                             ProfesjonellDB[id][charName] = true
                             Profesjonell.SyncNewRecipesCount = Profesjonell.SyncNewRecipesCount + 1
                             Profesjonell.SyncSources[sender] = true
@@ -238,7 +249,12 @@ function Profesjonell.OnAddonMessage(message, sender)
         
         local _, _, remoteHash, remoteVersion = string.find(message, pattern)
         if not remoteHash then
-            remoteHash = string.sub(message, string.len(string.find(message, ":")) + 1)
+            local colonPos = string.find(message, ":")
+            if colonPos then
+                remoteHash = string.sub(message, colonPos + 1)
+            else
+                remoteHash = ""
+            end
             remoteVersion = "0"
         end
 
