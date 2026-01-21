@@ -41,7 +41,7 @@ frame:SetScript("OnEvent", function()
             if Profesjonell.MigrateDatabase then
                 Profesjonell.MigrateDatabase()
             end
-            ProfesjonellConfig.version = "0.28"
+            ProfesjonellConfig.version = "0.29"
         end
 
         if Profesjonell.WipeDatabaseIfNoGuild then
