@@ -189,6 +189,8 @@ end
 
 function Profesjonell.GenerateDatabaseHash()
     local charHashes = Profesjonell.GenerateCharacterHashes()
+    if not charHashes then return nil end
+
     local sortedChars = {}
     for charName, _ in pairs(charHashes) do
         table.insert(sortedChars, charName)
@@ -206,12 +208,19 @@ function Profesjonell.GenerateDatabaseHash()
 end
 
 function Profesjonell.GenerateCharacterHashes()
+    if not Profesjonell.UpdateGuildRosterCache or not Profesjonell.UpdateGuildRosterCache() then
+        return nil
+    end
+
     local charEntries = {}
     if ProfesjonellDB then
         for key, holders in pairs(ProfesjonellDB) do
             for charName, _ in pairs(holders) do
-                if not charEntries[charName] then charEntries[charName] = {} end
-                table.insert(charEntries[charName], key)
+                -- Only include characters currently in the guild to ensure sync consistency
+                if Profesjonell.GuildRosterCache[charName] then
+                    if not charEntries[charName] then charEntries[charName] = {} end
+                    table.insert(charEntries[charName], key)
+                end
             end
         end
     end

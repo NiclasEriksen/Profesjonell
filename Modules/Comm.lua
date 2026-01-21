@@ -49,8 +49,12 @@ end
 function Profesjonell.BroadcastHash()
     if Profesjonell.GetGuildName() then
         local hash = Profesjonell.GenerateDatabaseHash()
-        Profesjonell.Debug("Broadcasting database hash: " .. hash .. " (v" .. Profesjonell.Version .. ")")
-        SendAddonMessage(Profesjonell.Name, "H:" .. hash .. ":" .. Profesjonell.Version, "GUILD")
+        if hash then
+            Profesjonell.Debug("Broadcasting database hash: " .. hash .. " (v" .. Profesjonell.Version .. ")")
+            SendAddonMessage(Profesjonell.Name, "H:" .. hash .. ":" .. Profesjonell.Version, "GUILD")
+        else
+            Profesjonell.Debug("Could not generate hash (roster not ready), skipping broadcast.")
+        end
     end
 end
 
@@ -121,8 +125,12 @@ end
 
 function Profesjonell.BroadcastCharacterHashes()
     local charHashes = Profesjonell.GenerateCharacterHashes()
+    if not charHashes then
+        Profesjonell.Debug("Could not generate character hashes, skipping response.")
+        return
+    end
+
     local currentMsg = "C:"
-    
     for charName, hash in pairs(charHashes) do
         local entry = charName .. ":" .. hash
         if string.len(currentMsg) + string.len(entry) + 1 > 250 then
@@ -192,7 +200,8 @@ function Profesjonell.OnAddonMessage(message, sender)
             
             if addedAny then
                 if Profesjonell.Frame.syncTimer and Profesjonell.Frame.lastRemoteHash then
-                    if Profesjonell.GenerateDatabaseHash() == Profesjonell.Frame.lastRemoteHash then
+                    local currentHash = Profesjonell.GenerateDatabaseHash()
+                    if currentHash and currentHash == Profesjonell.Frame.lastRemoteHash then
                         Profesjonell.Debug("Incremental update resolved hash mismatch. Cancelling sync request.")
                         Profesjonell.Frame.syncTimer = nil
                         Profesjonell.Frame.lastRemoteHash = nil
@@ -217,15 +226,19 @@ function Profesjonell.OnAddonMessage(message, sender)
         local _, _, data = string.find(message, "^C:(.+)$")
         if data then
             local myHashes = Profesjonell.GenerateCharacterHashes()
-            local gfindFunc = string.gfind or string.gmatch
-            for charEntry in gfindFunc(data, "([^,]+)") do
-                local _, _, charName, remoteHash = string.find(charEntry, "([^:]+):([^:]+)")
-                if charName and remoteHash then
-                    if myHashes[charName] ~= remoteHash then
-                        Profesjonell.Debug("Hash mismatch for " .. charName .. ". Requesting sync.")
-                        SendAddonMessage(Profesjonell.Name, "R:" .. charName, "GUILD")
+            if myHashes then
+                local gfindFunc = string.gfind or string.gmatch
+                for charEntry in gfindFunc(data, "([^,]+)") do
+                    local _, _, charName, remoteHash = string.find(charEntry, "([^:]+):([^:]+)")
+                    if charName and remoteHash then
+                        if myHashes[charName] ~= remoteHash then
+                            Profesjonell.Debug("Hash mismatch for " .. charName .. ". Requesting sync.")
+                            SendAddonMessage(Profesjonell.Name, "R:" .. charName, "GUILD")
+                        end
                     end
                 end
+            else
+                Profesjonell.Debug("Roster not ready for character hash comparison, skipping.")
             end
         end
     elseif string.find(message, "^R:") then
@@ -259,7 +272,7 @@ function Profesjonell.OnAddonMessage(message, sender)
         end
 
         local localHash = Profesjonell.GenerateDatabaseHash()
-        if localHash == remoteHash then
+        if localHash and localHash == remoteHash then
             if Profesjonell.Frame.pendingShare then
                 Profesjonell.Debug("Remote hash matches ours. Cancelling pending sync response.")
                 Profesjonell.Frame.pendingShare = nil
@@ -276,20 +289,22 @@ function Profesjonell.OnAddonMessage(message, sender)
             end
         end
         
-        if localHash ~= remoteHash then
-            Profesjonell.Debug("Hash mismatch! Requesting character hashes.")
-            SendAddonMessage(Profesjonell.Name, "Q", "GUILD")
-            
-            Profesjonell.Frame.lastRemoteHash = remoteHash
-            local delay = 10 + math.random() * 10
-            if not Profesjonell.Frame.syncTimer or GetTime() > Profesjonell.Frame.syncTimer then
-                Profesjonell.Frame.syncTimer = GetTime() + delay
-            end
-        else
-            if Profesjonell.Frame.syncTimer or Profesjonell.Frame.lastRemoteHash == remoteHash then
-                Profesjonell.Debug("Hashes match, cancelling pending sync.")
-                Profesjonell.Frame.syncTimer = nil
-                Profesjonell.Frame.lastRemoteHash = nil
+        if localHash then
+            if localHash ~= remoteHash then
+                Profesjonell.Debug("Hash mismatch! Requesting character hashes.")
+                SendAddonMessage(Profesjonell.Name, "Q", "GUILD")
+                
+                Profesjonell.Frame.lastRemoteHash = remoteHash
+                local delay = 10 + math.random() * 10
+                if not Profesjonell.Frame.syncTimer or GetTime() > Profesjonell.Frame.syncTimer then
+                    Profesjonell.Frame.syncTimer = GetTime() + delay
+                end
+            else
+                if Profesjonell.Frame.syncTimer or Profesjonell.Frame.lastRemoteHash == remoteHash then
+                    Profesjonell.Debug("Hashes match, cancelling pending sync.")
+                    Profesjonell.Frame.syncTimer = nil
+                    Profesjonell.Frame.lastRemoteHash = nil
+                end
             end
         end
     elseif string.find(message, "^REMOVE_CHAR:") then
