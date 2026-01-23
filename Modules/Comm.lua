@@ -17,25 +17,34 @@ function Profesjonell.ShareRecipes(charName, recipeList)
     
     local prefix = "B:" .. charName .. ":"
     local currentMsg = prefix
-    
+    local batches = {}
+    local batchCount = 0
+
     for _, recipeKey in ipairs(recipeList) do
         -- Check if adding this recipe would exceed the 255 char limit
         if string.len(currentMsg) + string.len(recipeKey) + 1 > 250 then
-            Profesjonell.Debug("Sending batched addon message (full): " .. currentMsg)
-            SendAddonMessage(Profesjonell.Name, currentMsg, "GUILD")
+            table.insert(batches, {msg = currentMsg, count = batchCount})
             currentMsg = prefix .. recipeKey
+            batchCount = 1
         else
             if currentMsg == prefix then
                 currentMsg = currentMsg .. recipeKey
+                batchCount = 1
             else
                 currentMsg = currentMsg .. "," .. recipeKey
+                batchCount = batchCount + 1
             end
         end
     end
-    
+
     if currentMsg ~= prefix then
-        Profesjonell.Debug("Sending batched addon message: " .. currentMsg)
-        SendAddonMessage(Profesjonell.Name, currentMsg, "GUILD")
+        table.insert(batches, {msg = currentMsg, count = batchCount})
+    end
+
+    local totalBatches = table.getn(batches)
+    for i, batch in ipairs(batches) do
+        Profesjonell.Debug("Sending recipe batch " .. i .. "/" .. totalBatches .. " (" .. batch.count .. " recipes)")
+        SendAddonMessage(Profesjonell.Name, batch.msg, "GUILD")
     end
 end
 
@@ -155,7 +164,21 @@ end
 function Profesjonell.OnAddonMessage(message, sender)
     if sender == Profesjonell.GetPlayerName() then return end
     
-    Profesjonell.Debug("Received addon message from " .. sender .. ": " .. message)
+    if string.find(message, "^B:") then
+        local _, _, charName, idList = string.find(message, "^B:([^:]+):(.+)$")
+        if charName and idList then
+            local count = 0
+            local gfindFunc = string.gfind or string.gmatch
+            for _ in gfindFunc(idList, "([^,]+)") do
+                count = count + 1
+            end
+            Profesjonell.Debug("Received recipe batch from " .. sender .. " for " .. charName .. " (" .. count .. " recipes)")
+        else
+            Profesjonell.Debug("Received addon message from " .. sender .. ": " .. message)
+        end
+    else
+        Profesjonell.Debug("Received addon message from " .. sender .. ": " .. message)
+    end
     if string.find(message, "^B:") then
         local _, _, charName, idList = string.find(message, "^B:([^:]+):(.+)$")
         if charName and idList and Profesjonell.IsInGuild(charName) then

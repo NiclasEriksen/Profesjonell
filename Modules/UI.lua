@@ -414,6 +414,12 @@ function Profesjonell.AttachTooltipHooks()
         HookTooltip(SpellTooltip)
     end
     HookTooltip(ItemRefTooltip)
+    if AtlasLootTooltip then
+        HookTooltip(AtlasLootTooltip)
+    end
+    if AtlasLootTooltip2 then
+        HookTooltip(AtlasLootTooltip2)
+    end
     Profesjonell.TooltipHooksAttached = true
 end
 
