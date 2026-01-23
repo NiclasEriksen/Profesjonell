@@ -278,7 +278,7 @@ function Profesjonell.AttachTooltipHooks()
         if tt.GetScript and tt.SetScript then
             local oldOnHide = tt:GetScript("OnHide")
             tt:SetScript("OnHide", function()
-                if oldOnHide then oldOnHide() end
+                if oldOnHide then oldOnHide(tt) end
                 tt._profHyperlink = nil
                 ClearKnownByLines(tt)
             end)
@@ -288,23 +288,25 @@ function Profesjonell.AttachTooltipHooks()
         if oldSetHyperlink then
             tt.SetHyperlink = function(self, link)
                 self._profHyperlink = link
-                oldSetHyperlink(self, link)
+                local r1, r2, r3, r4, r5 = oldSetHyperlink(self, link)
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetSpell = tt.SetSpell
         if oldSetSpell then
             tt.SetSpell = function(self, spell, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
-                oldSetSpell(self, spell, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
+                local r1, r2, r3, r4, r5 = oldSetSpell(self, spell, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetSpellBookItem = tt.SetSpellBookItem
         if oldSetSpellBookItem then
             tt.SetSpellBookItem = function(self, slot, bookType, a1, a2, a3, a4)
-                oldSetSpellBookItem(self, slot, bookType, a1, a2, a3, a4)
+                local r1, r2, r3, r4, r5 = oldSetSpellBookItem(self, slot, bookType, a1, a2, a3, a4)
                 self._profHyperlink = nil
                 if GetSpellLink then
                     local link = GetSpellLink(slot, bookType)
@@ -313,88 +315,96 @@ function Profesjonell.AttachTooltipHooks()
                     end
                 end
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetSpellBookItemByID = tt.SetSpellBookItemByID
         if oldSetSpellBookItemByID then
             tt.SetSpellBookItemByID = function(self, spellId, a1, a2, a3, a4)
-                oldSetSpellBookItemByID(self, spellId, a1, a2, a3, a4)
+                local r1, r2, r3, r4, r5 = oldSetSpellBookItemByID(self, spellId, a1, a2, a3, a4)
                 self._profHyperlink = nil
                 if spellId then
                     self._profHyperlink = "spell:" .. spellId
                 end
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetBagItem = tt.SetBagItem
         if oldSetBagItem then
             tt.SetBagItem = function(self, bag, slot, a1, a2, a3, a4)
-                oldSetBagItem(self, bag, slot, a1, a2, a3, a4)
+                local r1, r2, r3, r4, r5 = oldSetBagItem(self, bag, slot, a1, a2, a3, a4)
                 if GetContainerItemLink then
                     self._profHyperlink = GetContainerItemLink(bag, slot)
                 end
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetInventoryItem = tt.SetInventoryItem
         if oldSetInventoryItem then
             tt.SetInventoryItem = function(self, unit, slot, a1, a2, a3, a4)
-                oldSetInventoryItem(self, unit, slot, a1, a2, a3, a4)
+                local r1, r2, r3, r4, r5 = oldSetInventoryItem(self, unit, slot, a1, a2, a3, a4)
                 if GetInventoryItemLink then
                     self._profHyperlink = GetInventoryItemLink(unit, slot)
                 end
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetTradeSkillItem = tt.SetTradeSkillItem
         if oldSetTradeSkillItem then
             tt.SetTradeSkillItem = function(self, skillIndex, reagentIndex, a1, a2, a3, a4)
-                oldSetTradeSkillItem(self, skillIndex, reagentIndex, a1, a2, a3, a4)
+                local r1, r2, r3, r4, r5 = oldSetTradeSkillItem(self, skillIndex, reagentIndex, a1, a2, a3, a4)
                 if reagentIndex and GetTradeSkillReagentItemLink then
                     self._profHyperlink = GetTradeSkillReagentItemLink(skillIndex, reagentIndex)
                 elseif GetTradeSkillItemLink then
                     self._profHyperlink = GetTradeSkillItemLink(skillIndex)
                 end
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetTradeSkillReagentItem = tt.SetTradeSkillReagentItem
         if oldSetTradeSkillReagentItem then
             tt.SetTradeSkillReagentItem = function(self, skillIndex, reagentIndex, a1, a2, a3, a4)
-                oldSetTradeSkillReagentItem(self, skillIndex, reagentIndex, a1, a2, a3, a4)
+                local r1, r2, r3, r4, r5 = oldSetTradeSkillReagentItem(self, skillIndex, reagentIndex, a1, a2, a3, a4)
                 if GetTradeSkillReagentItemLink then
                     self._profHyperlink = GetTradeSkillReagentItemLink(skillIndex, reagentIndex)
                 end
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetCraftItem = tt.SetCraftItem
         if oldSetCraftItem then
             tt.SetCraftItem = function(self, index, reagentIndex, a1, a2, a3, a4)
-                oldSetCraftItem(self, index, reagentIndex, a1, a2, a3, a4)
+                local r1, r2, r3, r4, r5 = oldSetCraftItem(self, index, reagentIndex, a1, a2, a3, a4)
                 if reagentIndex and GetCraftReagentItemLink then
                     self._profHyperlink = GetCraftReagentItemLink(index, reagentIndex)
                 elseif GetCraftItemLink then
                     self._profHyperlink = GetCraftItemLink(index)
                 end
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
 
         local oldSetCraftSpell = tt.SetCraftSpell
         if oldSetCraftSpell then
             tt.SetCraftSpell = function(self, index, a1, a2, a3, a4)
-                oldSetCraftSpell(self, index, a1, a2, a3, a4)
+                local r1, r2, r3, r4, r5 = oldSetCraftSpell(self, index, a1, a2, a3, a4)
                 if GetCraftRecipeLink then
                     self._profHyperlink = GetCraftRecipeLink(index)
                 end
                 Profesjonell.AddKnownByToTooltip(self)
+                return r1, r2, r3, r4, r5
             end
         end
     end
