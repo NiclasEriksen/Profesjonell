@@ -4,7 +4,7 @@
 Profesjonell = Profesjonell or {}
 
 if Profesjonell.GetAddOnMetadata then
-    Profesjonell.Version = Profesjonell.GetAddOnMetadata("Profesjonell", "Version") or "0.30"
+    Profesjonell.Version = Profesjonell.GetAddOnMetadata("Profesjonell", "Version") or "0.31"
 end
 
 if Profesjonell.Log then
@@ -41,7 +41,7 @@ frame:SetScript("OnEvent", function()
             if Profesjonell.MigrateDatabase then
                 Profesjonell.MigrateDatabase()
             end
-            ProfesjonellConfig.version = "0.30"
+            ProfesjonellConfig.version = "0.31"
         end
 
         if Profesjonell.WipeDatabaseIfGuildChanged then
