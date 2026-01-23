@@ -199,6 +199,9 @@ function Profesjonell.OnAddonMessage(message, sender)
             end
             
             if addedAny then
+                if Profesjonell.InvalidateTooltipCache then
+                    Profesjonell.InvalidateTooltipCache()
+                end
                 -- Still doesn't match, but we are making progress. Delay the full sync.
                 if Profesjonell.Frame.syncTimer and Profesjonell.Frame.lastRemoteHash then
                     local currentHash = Profesjonell.GenerateDatabaseHash()
@@ -429,6 +432,9 @@ function Profesjonell.OnAddonMessage(message, sender)
                 if Profesjonell.Frame.syncTimer then
                     Profesjonell.Frame.syncTimer = GetTime() + 2 + math.random() * 3
                 end
+                if Profesjonell.InvalidateTooltipCache then
+                    Profesjonell.InvalidateTooltipCache()
+                end
             end
         end
     elseif string.find(message, "^REMOVE_RECIPE:") then
@@ -447,6 +453,9 @@ function Profesjonell.OnAddonMessage(message, sender)
                 Profesjonell.Print("Removed recipe '" .. recipeKey .. "' from " .. Profesjonell.ColorizeName(charName) .. " as requested by " .. Profesjonell.ColorizeName(sender))
                 if Profesjonell.Frame.syncTimer then
                     Profesjonell.Frame.syncTimer = GetTime() + 2 + math.random() * 3
+                end
+                if Profesjonell.InvalidateTooltipCache then
+                    Profesjonell.InvalidateTooltipCache()
                 end
             end
         end

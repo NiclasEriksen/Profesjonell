@@ -64,5 +64,8 @@ function Profesjonell.ScanRecipes(isCraft)
         Profesjonell.Print("Found " .. newCount .. " new recipes!")
         Profesjonell.ShareRecipes(playerName, newKeys)
         Profesjonell.Frame.broadcastHashTime = GetTime() + 10
+        if Profesjonell.InvalidateTooltipCache then
+            Profesjonell.InvalidateTooltipCache()
+        end
     end
 end

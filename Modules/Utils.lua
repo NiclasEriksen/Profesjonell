@@ -37,6 +37,9 @@ end
 function Profesjonell.GetIDFromLink(link)
     if not link then return nil end
     local _, _, type, id = string.find(link, "|H(%a+):(%d+)")
+    if not type or not id then
+        _, _, type, id = string.find(link, "^(%a+):(%d+)")
+    end
     if type and id then
         if type == "item" then type = "i"
         elseif type == "spell" then type = "s"

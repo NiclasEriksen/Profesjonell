@@ -47,6 +47,9 @@ frame:SetScript("OnEvent", function()
         if Profesjonell.WipeDatabaseIfGuildChanged then
             Profesjonell.WipeDatabaseIfGuildChanged()
         end
+        if Profesjonell.AttachTooltipHooks then
+            Profesjonell.AttachTooltipHooks()
+        end
     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
         if Profesjonell.ScanRecipes then
             Profesjonell.ScanRecipes(false)

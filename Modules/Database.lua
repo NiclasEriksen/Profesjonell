@@ -12,10 +12,350 @@ Profesjonell.SyncNewRecipesCount = Profesjonell.SyncNewRecipesCount or 0
 Profesjonell.SyncSources = Profesjonell.SyncSources or {}
 Profesjonell.SyncSummaryTimer = Profesjonell.SyncSummaryTimer or nil
 
+if not ProfesjonellConfig then ProfesjonellConfig = {} end
+ProfesjonellConfig.tooltipRecipeCache = ProfesjonellConfig.tooltipRecipeCache or {}
+ProfesjonellConfig.tooltipCacheEpoch = ProfesjonellConfig.tooltipCacheEpoch or 0
+
+Profesjonell.TooltipRecipeCache = ProfesjonellConfig.tooltipRecipeCache
+Profesjonell.TooltipCacheEpoch = ProfesjonellConfig.tooltipCacheEpoch
+
 local tooltip = CreateFrame("GameTooltip", "ProfesjonellTooltip", nil, "GameTooltipTemplate")
 tooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
 
 local nameCache = {}
+local tooltipLineMax = 30
+
+function Profesjonell.InvalidateTooltipCache()
+    Profesjonell.TooltipRecipeCache = {}
+    ProfesjonellConfig.tooltipRecipeCache = Profesjonell.TooltipRecipeCache
+    Profesjonell.TooltipCacheEpoch = (Profesjonell.TooltipCacheEpoch or 0) + 1
+    ProfesjonellConfig.tooltipCacheEpoch = Profesjonell.TooltipCacheEpoch
+end
+
+local function CacheResolvedKeys(cacheKey, keys)
+    if not cacheKey then return end
+    Profesjonell.TooltipRecipeCache[cacheKey] = {
+        keys = keys or {},
+        epoch = Profesjonell.TooltipCacheEpoch
+    }
+end
+
+local function GetCachedKeys(cacheKey)
+    local entry = cacheKey and Profesjonell.TooltipRecipeCache[cacheKey]
+    if entry and entry.epoch == Profesjonell.TooltipCacheEpoch then
+        if entry.keys and table.getn(entry.keys) > 0 then
+            return entry.keys
+        end
+        return nil
+    end
+    return nil
+end
+
+local function NormalizeTooltipLink(link)
+    if not link then return nil end
+    local _, _, normalized = string.find(link, "|H([^|]+)|h")
+    if normalized then return normalized end
+    return link
+end
+
+local function GetTooltipLinesForLink(link)
+    if not link then return nil end
+    tooltip:ClearLines()
+    local normalized = NormalizeTooltipLink(link)
+    if not pcall(tooltip.SetHyperlink, tooltip, normalized) then
+        return nil
+    end
+
+    local lines = {}
+    for i = 1, tooltipLineMax do
+        local textObj = _G["ProfesjonellTooltipTextLeft" .. i]
+        if not textObj then break end
+        local text = textObj:GetText()
+        if not text or text == "" then break end
+        table.insert(lines, text)
+    end
+    return lines
+end
+
+local function ExtractTeachOrCreateName(lines)
+    if not lines then return nil, nil end
+    local teachName, createdByName
+    for _, text in ipairs(lines) do
+        local stripped = string.gsub(text, "|c%x%x%x%x%x%x%x%x", "")
+        stripped = string.gsub(stripped, "|r", "")
+        stripped = string.gsub(stripped, "^%s+", "")
+        local _, _, useTeach = string.find(stripped, "^Use:%s*Teaches you how to%s+(.+)$")
+        if not teachName then
+            local _, _, teachA = string.find(stripped, "^Teaches:?%s*(.+)$")
+            local _, _, teachB = string.find(stripped, "^Teaches you how to create:?%s*(.+)$")
+            teachName = teachA or teachB
+        end
+        if not teachName and useTeach then
+            teachName = useTeach
+        end
+        if not createdByName then
+            local _, _, created = string.find(stripped, "^Created by:?%s*(.+)$")
+            createdByName = created
+        end
+        if teachName and createdByName then break end
+    end
+    return teachName, createdByName
+end
+
+local function NormalizeTeachName(text)
+    if not text then return nil end
+    local cleaned = string.gsub(text, "%.$", "")
+    local lower = string.lower(cleaned)
+    if string.find(lower, "^enchant%s+your%s+") then
+        local target = string.gsub(cleaned, "^[Ee]nchant%s+[Yy]our%s+", "")
+        return "Enchant " .. target
+    end
+    if string.find(lower, "^enchant%s+") then
+        return cleaned
+    end
+    if string.find(lower, "^(create|make|craft|cook)%s+") then
+        local stripped = string.gsub(cleaned, "^[Cc]reate%s+", "")
+        stripped = string.gsub(stripped, "^[Mm]ake%s+", "")
+        stripped = string.gsub(stripped, "^[Cc]raft%s+", "")
+        stripped = string.gsub(stripped, "^[Cc]ook%s+", "")
+        stripped = string.gsub(stripped, "^[Aa]n?%s+", "")
+        stripped = string.gsub(stripped, "^[Ss]ome%s+", "")
+        return stripped
+    end
+    return cleaned
+end
+
+function Profesjonell.FindRecipeKeysByExactName(name)
+    if not name then return {} end
+    local cleanName = Profesjonell.StripPrefix(name)
+    local searchName = string.lower(cleanName)
+    local keys = {}
+    if ProfesjonellDB then
+        for rKey, _ in pairs(ProfesjonellDB) do
+            local rName = Profesjonell.GetNameFromKey(rKey)
+            local cleanRName = Profesjonell.StripPrefix(rName)
+            if string.lower(cleanRName) == searchName then
+                table.insert(keys, rKey)
+            end
+        end
+    end
+    return keys
+end
+
+function Profesjonell.BuildKnownByLine(keys)
+    if not keys or table.getn(keys) == 0 then return nil end
+    if not ProfesjonellDB then return nil end
+
+    local holderSet = {}
+    for _, key in ipairs(keys) do
+        local holders = ProfesjonellDB[key]
+        if holders then
+            for charName, _ in pairs(holders) do
+                holderSet[charName] = true
+            end
+        end
+    end
+
+    local names = {}
+    for charName in pairs(holderSet) do
+        table.insert(names, charName)
+    end
+
+    local count = table.getn(names)
+    if count == 0 then return nil end
+    if count > 3 then
+        return "Known by " .. count .. " guild members"
+    end
+
+    local rosterReady = false
+    if Profesjonell.UpdateGuildRosterCache then
+        rosterReady = Profesjonell.UpdateGuildRosterCache()
+    end
+
+    if rosterReady and Profesjonell.GuildRosterCache then
+        local filtered = {}
+        for _, name in ipairs(names) do
+            if Profesjonell.GuildRosterCache[name] then
+                table.insert(filtered, name)
+            end
+        end
+        names = filtered
+        count = table.getn(names)
+        if count == 0 then return nil end
+    end
+
+    table.sort(names)
+    return "Known by: " .. table.concat(Profesjonell.ColorizeList(names), ", ")
+end
+
+function Profesjonell.ResolveRecipeKeysFromLink(link)
+    if not link then return nil end
+    local normalizedLink = NormalizeTooltipLink(link)
+    local cached = GetCachedKeys(normalizedLink)
+    if cached then return cached end
+
+    local key = Profesjonell.GetIDFromLink(normalizedLink)
+    if not key then
+        CacheResolvedKeys(normalizedLink, nil)
+        return nil
+    end
+
+    local _, _, type, id = string.find(key, "([^:]+):(%d+)")
+    if type == "s" or type == "e" then
+        if ProfesjonellDB and ProfesjonellDB[key] then
+            CacheResolvedKeys(normalizedLink, {key})
+            return {key}
+        end
+        local altKey
+        if type == "s" then altKey = "e:" .. id else altKey = "s:" .. id end
+        if ProfesjonellDB and ProfesjonellDB[altKey] then
+            CacheResolvedKeys(normalizedLink, {altKey})
+            return {altKey}
+        end
+        CacheResolvedKeys(normalizedLink, nil)
+        return nil
+    elseif type ~= "i" then
+        CacheResolvedKeys(normalizedLink, nil)
+        return nil
+    end
+
+    if ProfesjonellDB and ProfesjonellDB[key] then
+        CacheResolvedKeys(normalizedLink, {key})
+        return {key}
+    end
+
+    local itemName = Profesjonell.GetItemNameFromLink(link)
+    if itemName and (itemName == link or string.find(itemName, "^item:")) then
+        local nameFromAPI = GetItemInfo(id)
+        if nameFromAPI then
+            itemName = nameFromAPI
+        end
+    end
+    local _, _, _, _, _, itemType = GetItemInfo(id)
+    local keys = {}
+
+    local isRecipeItem = (itemType == "Recipe")
+    if not isRecipeItem and itemName then
+        local stripped = Profesjonell.StripPrefix(itemName)
+        if stripped and stripped ~= itemName then
+            isRecipeItem = true
+        end
+    end
+
+    if isRecipeItem then
+        local lines = GetTooltipLinesForLink(link)
+        local teachName = ExtractTeachOrCreateName(lines)
+        local normalizedTeach = NormalizeTeachName(teachName)
+        local targetName = Profesjonell.GetItemNameFromLink(normalizedTeach or teachName or itemName)
+        keys = Profesjonell.FindRecipeKeysByExactName(targetName)
+        if not keys or table.getn(keys) == 0 then
+            local baseName = Profesjonell.StripPrefix(itemName or "")
+            if baseName and baseName ~= "" then
+                local variants = { baseName }
+                if string.find(baseName, "^Transmute%s") and not string.find(baseName, "^Transmute:%s") then
+                    local withColon = string.gsub(baseName, "^Transmute%s+", "Transmute: ")
+                    table.insert(variants, withColon)
+                end
+                for _, variant in ipairs(variants) do
+                    keys = Profesjonell.FindRecipeKeysByExactName(variant)
+                    if keys and table.getn(keys) > 0 then break end
+                end
+            end
+        end
+    else
+        local lines = GetTooltipLinesForLink(link)
+        local _, createdByName = ExtractTeachOrCreateName(lines)
+        if createdByName then
+            keys = Profesjonell.FindRecipeKeysByExactName(Profesjonell.GetItemNameFromLink(createdByName))
+        else
+            local allowTypes = {
+                ["Consumable"] = true,
+                ["Armor"] = true,
+                ["Weapon"] = true,
+                ["Trade Goods"] = true
+            }
+            if itemType and allowTypes[itemType] then
+                keys = Profesjonell.FindRecipeKeysByExactName(itemName)
+            end
+        end
+    end
+
+    if keys and table.getn(keys) > 0 then
+        CacheResolvedKeys(normalizedLink, keys)
+        return keys
+    end
+
+    CacheResolvedKeys(normalizedLink, nil)
+    return nil
+end
+
+function Profesjonell.ResolveRecipeKeysFromTooltip(tooltip)
+    if not tooltip or not tooltip.GetName or not Profesjonell.FindRecipeKeysByExactName then return nil end
+    local tooltipName = tooltip:GetName()
+    if not tooltipName then return nil end
+
+    local lines = {}
+    local numLines = tooltip:NumLines() or 0
+    for i = 1, numLines do
+        local textObj = _G[tooltipName .. "TextLeft" .. i]
+        local text = textObj and textObj:GetText()
+        if text and text ~= "" then
+            table.insert(lines, text)
+        end
+    end
+
+    if table.getn(lines) == 0 then return nil end
+
+    local teachName, createdByName = ExtractTeachOrCreateName(lines)
+    if teachName then
+        local normalizedTeach = NormalizeTeachName(teachName)
+        local targetName = Profesjonell.GetItemNameFromLink(normalizedTeach or teachName)
+        local keys = Profesjonell.FindRecipeKeysByExactName(targetName)
+        if keys and table.getn(keys) > 0 then return keys end
+    end
+
+    if createdByName then
+        local keys = Profesjonell.FindRecipeKeysByExactName(Profesjonell.GetItemNameFromLink(createdByName))
+        if keys and table.getn(keys) > 0 then return keys end
+    end
+
+    local title = lines[1]
+    if not title then return nil end
+
+    local isRelevant = false
+    for _, text in ipairs(lines) do
+        if string.find(text, "^Reagents:?") or string.find(text, "^Requires") or string.find(text, "^Use:") then
+            isRelevant = true
+            break
+        end
+    end
+
+    if not isRelevant then
+        local stripped = Profesjonell.StripPrefix(title)
+        if stripped and stripped ~= title then
+            isRelevant = true
+        end
+    end
+
+    if not isRelevant then return nil end
+
+    local keys = Profesjonell.FindRecipeKeysByExactName(title)
+    if keys and table.getn(keys) > 0 then return keys end
+
+    local strippedTitle = Profesjonell.StripPrefix(title)
+    if strippedTitle ~= title then
+        keys = Profesjonell.FindRecipeKeysByExactName(strippedTitle)
+        if keys and table.getn(keys) > 0 then return keys end
+    end
+
+    if string.find(title, "^Transmute%s") and not string.find(title, "^Transmute:%s") then
+        local withColon = string.gsub(title, "^Transmute%s+", "Transmute: ")
+        keys = Profesjonell.FindRecipeKeysByExactName(withColon)
+        if keys and table.getn(keys) > 0 then return keys end
+    end
+
+    return nil
+end
 
 function Profesjonell.GetNameFromKey(key)
     if nameCache[key] then return nameCache[key] end
@@ -186,6 +526,9 @@ function Profesjonell.WipeDatabaseIfGuildChanged()
             Profesjonell.Print("Guild changed from " .. ProfesjonellConfig.lastGuild .. " to " .. currentGuild .. ". Wiping recipe database to prevent cross-guild leaking.")
             ProfesjonellDB = {}
             Profesjonell.BroadcastHash()
+            if Profesjonell.InvalidateTooltipCache then
+                Profesjonell.InvalidateTooltipCache()
+            end
         end
     end
     

@@ -154,6 +154,259 @@ function Profesjonell.OnGuildChat(msg, sender)
     end
 end
 
+local function TooltipHasKnownByLine(tooltip)
+    if not tooltip or not tooltip.GetName or not tooltip.NumLines then return false end
+    local tooltipName = tooltip:GetName()
+    local numLines = tooltip:NumLines() or 0
+    for i = 1, numLines do
+        local textObj = _G[tooltipName .. "TextLeft" .. i]
+        local text = textObj and textObj:GetText()
+        if text and string.find(text, "^Known by") then
+            return true
+        end
+    end
+    return false
+end
+
+local function FindKnownByLineIndex(tooltip)
+    if not tooltip or not tooltip.GetName then return nil end
+    local tooltipName = tooltip:GetName()
+    for i = 1, 30 do
+        local textObj = _G[tooltipName .. "TextLeft" .. i]
+        local text = textObj and textObj:GetText()
+        if text and string.find(text, "^Known by") then
+            return i
+        end
+    end
+    return nil
+end
+
+local function ClearKnownByLines(tooltip)
+    if not tooltip or not tooltip.GetName then return end
+    local tooltipName = tooltip:GetName()
+    for i = 1, 30 do
+        local textObj = _G[tooltipName .. "TextLeft" .. i]
+        local text = textObj and textObj:GetText()
+        if text and string.find(text, "^Known by") then
+            if textObj.SetText then
+                textObj:SetText("")
+            end
+        end
+    end
+end
+
+function Profesjonell.GetTooltipLink(tooltip)
+    if not tooltip then return nil end
+    return tooltip._profHyperlink
+end
+
+function Profesjonell.AddKnownByToTooltip(tooltip)
+    if not tooltip or not Profesjonell.ResolveRecipeKeysFromLink then return end
+    ClearKnownByLines(tooltip)
+    local existingIndex = FindKnownByLineIndex(tooltip)
+
+    local link = Profesjonell.GetTooltipLink(tooltip)
+    if not link then
+        local keys = Profesjonell.ResolveRecipeKeysFromTooltip and Profesjonell.ResolveRecipeKeysFromTooltip(tooltip)
+        if not keys then return end
+        local line = Profesjonell.BuildKnownByLine and Profesjonell.BuildKnownByLine(keys)
+        if line then
+            if existingIndex then
+                local tooltipName = tooltip:GetName()
+                local textObj = tooltipName and _G[tooltipName .. "TextLeft" .. existingIndex]
+                if textObj and textObj.SetText then
+                    textObj:SetText(line)
+                else
+                    tooltip:AddLine(line)
+                end
+            else
+                tooltip:AddLine(line)
+            end
+            if tooltip.Show then tooltip:Show() end
+        elseif existingIndex then
+            local tooltipName = tooltip:GetName()
+            local textObj = tooltipName and _G[tooltipName .. "TextLeft" .. existingIndex]
+            if textObj and textObj.SetText then
+                textObj:SetText("")
+            end
+            if tooltip.Show then tooltip:Show() end
+        end
+        return
+    end
+
+    local keys = Profesjonell.ResolveRecipeKeysFromLink(link)
+    if not keys then
+        if existingIndex then
+            local tooltipName = tooltip:GetName()
+            local textObj = tooltipName and _G[tooltipName .. "TextLeft" .. existingIndex]
+            if textObj and textObj.SetText then
+                textObj:SetText("")
+            end
+            if tooltip.Show then tooltip:Show() end
+        end
+        return
+    end
+
+    local line = Profesjonell.BuildKnownByLine and Profesjonell.BuildKnownByLine(keys)
+    if line then
+        if existingIndex then
+            local tooltipName = tooltip:GetName()
+            local textObj = tooltipName and _G[tooltipName .. "TextLeft" .. existingIndex]
+            if textObj and textObj.SetText then
+                textObj:SetText(line)
+            else
+                tooltip:AddLine(line)
+            end
+        else
+            tooltip:AddLine(line)
+        end
+        if tooltip.Show then tooltip:Show() end
+    elseif existingIndex then
+        local tooltipName = tooltip:GetName()
+        local textObj = tooltipName and _G[tooltipName .. "TextLeft" .. existingIndex]
+        if textObj and textObj.SetText then
+            textObj:SetText("")
+        end
+        if tooltip.Show then tooltip:Show() end
+    end
+end
+
+function Profesjonell.AttachTooltipHooks()
+    if Profesjonell.TooltipHooksAttached then return end
+    local function HookTooltip(tt)
+        if not tt then return end
+        if tt.GetScript and tt.SetScript then
+            local oldOnHide = tt:GetScript("OnHide")
+            tt:SetScript("OnHide", function()
+                if oldOnHide then oldOnHide() end
+                tt._profHyperlink = nil
+                ClearKnownByLines(tt)
+            end)
+        end
+
+        local oldSetHyperlink = tt.SetHyperlink
+        if oldSetHyperlink then
+            tt.SetHyperlink = function(self, link)
+                self._profHyperlink = link
+                oldSetHyperlink(self, link)
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetSpell = tt.SetSpell
+        if oldSetSpell then
+            tt.SetSpell = function(self, spell, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
+                oldSetSpell(self, spell, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetSpellBookItem = tt.SetSpellBookItem
+        if oldSetSpellBookItem then
+            tt.SetSpellBookItem = function(self, slot, bookType, a1, a2, a3, a4)
+                oldSetSpellBookItem(self, slot, bookType, a1, a2, a3, a4)
+                self._profHyperlink = nil
+                if GetSpellLink then
+                    local link = GetSpellLink(slot, bookType)
+                    if link then
+                        self._profHyperlink = link
+                    end
+                end
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetSpellBookItemByID = tt.SetSpellBookItemByID
+        if oldSetSpellBookItemByID then
+            tt.SetSpellBookItemByID = function(self, spellId, a1, a2, a3, a4)
+                oldSetSpellBookItemByID(self, spellId, a1, a2, a3, a4)
+                self._profHyperlink = nil
+                if spellId then
+                    self._profHyperlink = "spell:" .. spellId
+                end
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetBagItem = tt.SetBagItem
+        if oldSetBagItem then
+            tt.SetBagItem = function(self, bag, slot, a1, a2, a3, a4)
+                oldSetBagItem(self, bag, slot, a1, a2, a3, a4)
+                if GetContainerItemLink then
+                    self._profHyperlink = GetContainerItemLink(bag, slot)
+                end
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetInventoryItem = tt.SetInventoryItem
+        if oldSetInventoryItem then
+            tt.SetInventoryItem = function(self, unit, slot, a1, a2, a3, a4)
+                oldSetInventoryItem(self, unit, slot, a1, a2, a3, a4)
+                if GetInventoryItemLink then
+                    self._profHyperlink = GetInventoryItemLink(unit, slot)
+                end
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetTradeSkillItem = tt.SetTradeSkillItem
+        if oldSetTradeSkillItem then
+            tt.SetTradeSkillItem = function(self, skillIndex, reagentIndex, a1, a2, a3, a4)
+                oldSetTradeSkillItem(self, skillIndex, reagentIndex, a1, a2, a3, a4)
+                if reagentIndex and GetTradeSkillReagentItemLink then
+                    self._profHyperlink = GetTradeSkillReagentItemLink(skillIndex, reagentIndex)
+                elseif GetTradeSkillItemLink then
+                    self._profHyperlink = GetTradeSkillItemLink(skillIndex)
+                end
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetTradeSkillReagentItem = tt.SetTradeSkillReagentItem
+        if oldSetTradeSkillReagentItem then
+            tt.SetTradeSkillReagentItem = function(self, skillIndex, reagentIndex, a1, a2, a3, a4)
+                oldSetTradeSkillReagentItem(self, skillIndex, reagentIndex, a1, a2, a3, a4)
+                if GetTradeSkillReagentItemLink then
+                    self._profHyperlink = GetTradeSkillReagentItemLink(skillIndex, reagentIndex)
+                end
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetCraftItem = tt.SetCraftItem
+        if oldSetCraftItem then
+            tt.SetCraftItem = function(self, index, reagentIndex, a1, a2, a3, a4)
+                oldSetCraftItem(self, index, reagentIndex, a1, a2, a3, a4)
+                if reagentIndex and GetCraftReagentItemLink then
+                    self._profHyperlink = GetCraftReagentItemLink(index, reagentIndex)
+                elseif GetCraftItemLink then
+                    self._profHyperlink = GetCraftItemLink(index)
+                end
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+
+        local oldSetCraftSpell = tt.SetCraftSpell
+        if oldSetCraftSpell then
+            tt.SetCraftSpell = function(self, index, a1, a2, a3, a4)
+                oldSetCraftSpell(self, index, a1, a2, a3, a4)
+                if GetCraftRecipeLink then
+                    self._profHyperlink = GetCraftRecipeLink(index)
+                end
+                Profesjonell.AddKnownByToTooltip(self)
+            end
+        end
+    end
+
+    HookTooltip(GameTooltip)
+    if SpellTooltip then
+        HookTooltip(SpellTooltip)
+    end
+    HookTooltip(ItemRefTooltip)
+    Profesjonell.TooltipHooksAttached = true
+end
+
 -- Slash Command
 SLASH_PROFESJONELL1 = "/prof"
 SLASH_PROFESJONELL2 = "/profesjonell"
@@ -202,6 +455,9 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                     ProfesjonellDB[key][charName] = true
                     Profesjonell.Print("Added " .. (cleanRecipeName or key) .. " to " .. Profesjonell.ColorizeName(charName) .. " and broadcasting.")
                     Profesjonell.ShareRecipes(charName, {key})
+                    if Profesjonell.InvalidateTooltipCache then
+                        Profesjonell.InvalidateTooltipCache()
+                    end
                     if Profesjonell.GetGuildName() then
                         SendChatMessage("Profesjonell: Added " .. (cleanRecipeName or key) .. " to " .. charName, "GUILD")
                     end
@@ -235,6 +491,9 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                     if not next(ProfesjonellDB[key]) then ProfesjonellDB[key] = nil end
                     Profesjonell.Print("Removed " .. (cleanRecipeName or key) .. " from " .. Profesjonell.ColorizeName(charName) .. " and broadcasting.")
                     SendAddonMessage(Profesjonell.Name, "REMOVE_RECIPE:" .. charName .. ":" .. key, "GUILD")
+                    if Profesjonell.InvalidateTooltipCache then
+                        Profesjonell.InvalidateTooltipCache()
+                    end
                     if Profesjonell.GetGuildName() then
                         SendChatMessage("Profesjonell: Removed " .. (cleanRecipeName or key) .. " from " .. charName, "GUILD")
                     end
@@ -255,6 +514,9 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                     if removedCount > 0 then
                         Profesjonell.Print("Removed " .. Profesjonell.ColorizeName(charNameOnly) .. " from local database and broadcasting.")
                         SendAddonMessage(Profesjonell.Name, "REMOVE_CHAR:" .. charNameOnly, "GUILD")
+                        if Profesjonell.InvalidateTooltipCache then
+                            Profesjonell.InvalidateTooltipCache()
+                        end
                     else
                         Profesjonell.Print("Character " .. Profesjonell.ColorizeName(charNameOnly) .. " not found.")
                     end
