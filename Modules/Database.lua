@@ -175,16 +175,21 @@ function Profesjonell.FindRecipeHolders(name)
     return found, (exactMatchName or cleanName), partialMatches, exactMatchLink, partialLinks
 end
 
-function Profesjonell.WipeDatabaseIfNoGuild()
-    local guildName = Profesjonell.GetGuildName()
-    if not guildName then
-        if Profesjonell.Frame.enteredWorldTime and GetTime() - Profesjonell.Frame.enteredWorldTime > 30 then
-            if ProfesjonellDB and next(ProfesjonellDB) then
-                ProfesjonellDB = {}
-                Profesjonell.Print("You are no longer in a guild. The database has been wiped for security/privacy.")
-            end
+function Profesjonell.WipeDatabaseIfGuildChanged()
+    local currentGuild = Profesjonell.GetGuildName()
+    if not currentGuild then return end
+
+    if not ProfesjonellConfig then ProfesjonellConfig = {} end
+    
+    if ProfesjonellConfig.lastGuild and ProfesjonellConfig.lastGuild ~= currentGuild then
+        if ProfesjonellDB and next(ProfesjonellDB) then
+            Profesjonell.Print("Guild changed from " .. ProfesjonellConfig.lastGuild .. " to " .. currentGuild .. ". Wiping recipe database to prevent cross-guild leaking.")
+            ProfesjonellDB = {}
+            Profesjonell.BroadcastHash()
         end
     end
+    
+    ProfesjonellConfig.lastGuild = currentGuild
 end
 
 function Profesjonell.GenerateDatabaseHash()

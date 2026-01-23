@@ -47,6 +47,20 @@ function Profesjonell.GetIDFromLink(link)
     return nil
 end
 
+function Profesjonell.CompareVersions(v1, v2)
+    local _, _, maj1, min1 = string.find(v1 or "0", "(%d+)%.(%d+)")
+    local _, _, maj2, min2 = string.find(v2 or "0", "(%d+)%.(%d+)")
+    
+    maj1, min1 = tonumber(maj1 or v1 or 0), tonumber(min1 or 0)
+    maj2, min2 = tonumber(maj2 or v2 or 0), tonumber(min2 or 0)
+    
+    if maj1 > maj2 then return 1 end
+    if maj1 < maj2 then return -1 end
+    if min1 > min2 then return 1 end
+    if min1 < min2 then return -1 end
+    return 0
+end
+
 local classColors = {}
 function Profesjonell.GetClassColor(className)
     if not next(classColors) and RAID_CLASS_COLORS then

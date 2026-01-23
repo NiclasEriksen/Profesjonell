@@ -4,7 +4,7 @@
 Profesjonell = Profesjonell or {}
 
 if Profesjonell.GetAddOnMetadata then
-    Profesjonell.Version = Profesjonell.GetAddOnMetadata("Profesjonell", "Version") or "0.28"
+    Profesjonell.Version = Profesjonell.GetAddOnMetadata("Profesjonell", "Version") or "0.30"
 end
 
 if Profesjonell.Log then
@@ -41,11 +41,11 @@ frame:SetScript("OnEvent", function()
             if Profesjonell.MigrateDatabase then
                 Profesjonell.MigrateDatabase()
             end
-            ProfesjonellConfig.version = "0.29"
+            ProfesjonellConfig.version = "0.30"
         end
 
-        if Profesjonell.WipeDatabaseIfNoGuild then
-            Profesjonell.WipeDatabaseIfNoGuild()
+        if Profesjonell.WipeDatabaseIfGuildChanged then
+            Profesjonell.WipeDatabaseIfGuildChanged()
         end
     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
         if Profesjonell.ScanRecipes then
@@ -64,8 +64,8 @@ frame:SetScript("OnEvent", function()
             Profesjonell.OnGuildChat(arg1, arg2)
         end
     elseif event == "PLAYER_GUILD_UPDATE" then
-        if Profesjonell.WipeDatabaseIfNoGuild then
-            Profesjonell.WipeDatabaseIfNoGuild()
+        if Profesjonell.WipeDatabaseIfGuildChanged then
+            Profesjonell.WipeDatabaseIfGuildChanged()
         end
     elseif event == "CHAT_MSG_ADDON" and arg1 == "Profesjonell" then
         if Profesjonell.OnAddonMessage then
