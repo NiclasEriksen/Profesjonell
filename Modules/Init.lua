@@ -8,7 +8,7 @@ end
 
 -- Core properties
 Profesjonell.Name = "Profesjonell"
-Profesjonell.Version = "0.31"
+Profesjonell.Version = "0.32"
 
 -- Ensure sub-tables exist
 Profesjonell.PendingReplies = Profesjonell.PendingReplies or {}
