@@ -11,6 +11,10 @@ function Profesjonell.OnUpdate()
     local now = GetTime()
     local frame = Profesjonell.Frame
 
+    if Profesjonell.FlushDebug then
+        Profesjonell.FlushDebug()
+    end
+
     if frame.broadcastHashTime and now >= frame.broadcastHashTime then
         Profesjonell.BroadcastHash()
         frame.broadcastHashTime = nil
