@@ -26,46 +26,6 @@ function Profesjonell.OnUpdate()
         end
     end
 
-    if frame.broadcastHashTime and now >= frame.broadcastHashTime then
-        Profesjonell.BroadcastHash()
-        frame.broadcastHashTime = nil
-    end
-
-    if frame.syncTimer and now >= frame.syncTimer then
-        if frame.lastRemoteHash and frame.lastSyncPeer then
-            local currentHash = Profesjonell.GenerateDatabaseHash()
-            if currentHash ~= frame.lastRemoteHash then
-                if frame.syncRetryCount and frame.syncRetryCount >= 3 then
-                    Profesjonell.Debug("Sync retries exhausted for " .. frame.lastSyncPeer .. ". Stopping sync to avoid loops.")
-                    frame.syncTimer = nil
-                    frame.lastRemoteHash = nil
-                    frame.lastSyncPeer = nil
-                    frame.syncPendingChars = nil
-                    frame.syncRetryCount = nil
-                    return
-                end
-
-                frame.syncRetryCount = (frame.syncRetryCount or 0) + 1
-                Profesjonell.Debug("Sync timer expired, hashes still mismatch (attempt " .. frame.syncRetryCount .. "/3). Requesting character hashes from " .. frame.lastSyncPeer)
-                SendAddonMessage(Profesjonell.Name, "Q", "GUILD")
-                -- Extend the timer to allow the Q response to arrive
-                frame.syncTimer = GetTime() + 15 + math.random() * 5
-                return -- Wait for next update
-            end
-            frame.syncRetryCount = nil
-        end
-        Profesjonell.RequestSync()
-        frame.syncTimer = nil
-        frame.lastRemoteHash = nil
-        frame.lastSyncPeer = nil
-        frame.syncPendingChars = nil
-    end
-
-    if frame.pendingShare and now >= frame.pendingShare then
-        Profesjonell.ShareAllRecipes(true)
-        frame.pendingShare = nil
-    end
-
     if Profesjonell.SyncSummaryTimer and now >= Profesjonell.SyncSummaryTimer then
         local sourceList = {}
         for name, _ in pairs(Profesjonell.SyncSources) do

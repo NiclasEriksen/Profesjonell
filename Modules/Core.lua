@@ -76,7 +76,6 @@ frame:SetScript("OnEvent", function()
 end)
 
 frame:SetScript("OnUpdate", function()
-    if Profesjonell.OnUpdate then
-        Profesjonell.OnUpdate()
-    end
+    if Profesjonell.OnUpdate then Profesjonell.OnUpdate() end
+    if Profesjonell.OnCommUpdate then Profesjonell.OnCommUpdate() end
 end)
