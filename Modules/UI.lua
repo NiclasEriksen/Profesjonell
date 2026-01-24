@@ -14,6 +14,17 @@ function Profesjonell.OnUpdate()
     if Profesjonell.FlushDebug then
         Profesjonell.FlushDebug()
     end
+    if frame.pendingGuildMemberHook and Profesjonell.TryAttachGuildMemberProfessionInfo then
+        if Profesjonell.TryAttachGuildMemberProfessionInfo() then
+            frame.pendingGuildMemberHook = nil
+        end
+    end
+    if Profesjonell.UpdateGuildMemberProfessionInfo and GuildMemberDetailFrame and GuildMemberDetailFrame:IsShown() then
+        if not frame.guildMemberDetailUpdate or now >= frame.guildMemberDetailUpdate then
+            Profesjonell.UpdateGuildMemberProfessionInfo()
+            frame.guildMemberDetailUpdate = now + 0.5
+        end
+    end
 
     if frame.broadcastHashTime and now >= frame.broadcastHashTime then
         Profesjonell.BroadcastHash()

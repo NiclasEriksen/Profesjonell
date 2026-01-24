@@ -30,6 +30,9 @@ function Profesjonell.InvalidateTooltipCache()
     ProfesjonellConfig.tooltipRecipeCache = Profesjonell.TooltipRecipeCache
     Profesjonell.TooltipCacheEpoch = (Profesjonell.TooltipCacheEpoch or 0) + 1
     ProfesjonellConfig.tooltipCacheEpoch = Profesjonell.TooltipCacheEpoch
+    if Profesjonell.InvalidateProfessionCache then
+        Profesjonell.InvalidateProfessionCache()
+    end
 end
 
 local function CacheResolvedKeys(cacheKey, keys)

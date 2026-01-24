@@ -3,10 +3,6 @@
 -- Ensure the global table exists
 Profesjonell = Profesjonell or {}
 
-if Profesjonell.GetAddOnMetadata then
-    Profesjonell.Version = Profesjonell.GetAddOnMetadata("Profesjonell", "Version") or "0.32"
-end
-
 if Profesjonell.Log then
     Profesjonell.Log("Core.lua loading")
 end
@@ -41,7 +37,6 @@ frame:SetScript("OnEvent", function()
             if Profesjonell.MigrateDatabase then
                 Profesjonell.MigrateDatabase()
             end
-            ProfesjonellConfig.version = "0.32"
         end
 
         if Profesjonell.WipeDatabaseIfGuildChanged then
@@ -49,6 +44,9 @@ frame:SetScript("OnEvent", function()
         end
         if Profesjonell.AttachTooltipHooks then
             Profesjonell.AttachTooltipHooks()
+        end
+        if Profesjonell.AttachGuildMemberProfessionInfo then
+            Profesjonell.AttachGuildMemberProfessionInfo()
         end
     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
         if Profesjonell.ScanRecipes then
