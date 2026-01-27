@@ -46,19 +46,7 @@ local function NormalizeSignatureKey(value)
     end
     if type(value) ~= "string" then return nil end
 
-    local linkKey = Profesjonell.GetIDFromLink and Profesjonell.GetIDFromLink(value)
-    if linkKey then return linkKey end
-
-    local _, _, typePrefix, id = string.find(value, "^(%a+):(%d+)$")
-    if typePrefix and id then
-        if typePrefix == "item" then typePrefix = "i"
-        elseif typePrefix == "spell" then typePrefix = "s"
-        elseif typePrefix == "enchant" then typePrefix = "e"
-        end
-        return typePrefix .. ":" .. id
-    end
-
-    return value
+    return Profesjonell.GetIDFromLink and Profesjonell.GetIDFromLink(value) or value
 end
 
 function Profesjonell.InvalidateProfessionCache()

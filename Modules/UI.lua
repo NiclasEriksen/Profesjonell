@@ -42,6 +42,16 @@ function Profesjonell.OnUpdate()
         Profesjonell.SyncSummaryTimer = nil
     end
 
+    if frame.pendingP then
+        for queryKey, time in pairs(frame.pendingP) do
+            if now >= time then
+                Profesjonell.Debug("Sending P coordination for '" .. queryKey .. "'")
+                SendAddonMessage(Profesjonell.Name, "P:" .. queryKey, "GUILD")
+                frame.pendingP[queryKey] = nil
+            end
+        end
+    end
+
     for queryKey, data in pairs(Profesjonell.PendingReplies) do
         if now >= data.time then
             local found, cleanName, partialMatches, exactMatchLink, partialLinks = Profesjonell.FindRecipeHolders(data.originalQuery)
@@ -102,21 +112,20 @@ function Profesjonell.OnGuildChat(msg, sender)
             local queryKey = string.lower(inputCleanName)
             
             if not Profesjonell.PendingReplies[queryKey] then
-                local playerName = Profesjonell.GetPlayerName()
-                local playerOffset = 0
-                if playerName then
-                    for i=1, string.len(playerName) do
-                        playerOffset = math.mod(playerOffset + string.byte(playerName, i), 50)
-                    end
-                    playerOffset = playerOffset / 100
-                end
-            
+                local playerOffset = Profesjonell.GetPlayerOffset()
                 local delay = 1.0 + playerOffset + math.random() * 2.5
                 Profesjonell.PendingReplies[queryKey] = {
                     time = GetTime() + delay,
                     originalQuery = recipe,
                     cleanName = inputCleanName
                 }
+
+                -- Schedule a fast addon message to coordinate with other modern clients
+                if not Profesjonell.Frame.pendingP then Profesjonell.Frame.pendingP = {} end
+                if not Profesjonell.Frame.pendingP[queryKey] then
+                    local fastDelay = 0.1 + playerOffset + math.random() * 0.4
+                    Profesjonell.Frame.pendingP[queryKey] = GetTime() + fastDelay
+                end
             end
         end
     elseif string.find(msg, "^Profesjonell: ") then

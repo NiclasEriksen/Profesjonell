@@ -22,12 +22,20 @@ Profesjonell.TooltipCacheEpoch = ProfesjonellConfig.tooltipCacheEpoch
 local tooltip = CreateFrame("GameTooltip", "ProfesjonellTooltip", nil, "GameTooltipTemplate")
 tooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
 
-local nameCache = {}
+Profesjonell.NameCache = {}
+local nameCache = Profesjonell.NameCache
 local tooltipLineMax = 30
+local fullTypes = {
+    s = "spell", spell = "spell",
+    e = "enchant", enchant = "enchant",
+    i = "item", item = "item"
+}
 
 function Profesjonell.InvalidateTooltipCache()
     Profesjonell.TooltipRecipeCache = {}
     ProfesjonellConfig.tooltipRecipeCache = Profesjonell.TooltipRecipeCache
+    Profesjonell.NameCache = {}
+    nameCache = Profesjonell.NameCache
     Profesjonell.TooltipCacheEpoch = (Profesjonell.TooltipCacheEpoch or 0) + 1
     ProfesjonellConfig.tooltipCacheEpoch = Profesjonell.TooltipCacheEpoch
     if Profesjonell.InvalidateProfessionCache then
@@ -116,15 +124,18 @@ local function NormalizeTeachName(text)
     if string.find(lower, "^enchant%s+") then
         return cleaned
     end
-    if string.find(lower, "^(create|make|craft|cook)%s+") then
-        local stripped = string.gsub(cleaned, "^[Cc]reate%s+", "")
-        stripped = string.gsub(stripped, "^[Mm]ake%s+", "")
-        stripped = string.gsub(stripped, "^[Cc]raft%s+", "")
-        stripped = string.gsub(stripped, "^[Cc]ook%s+", "")
-        stripped = string.gsub(stripped, "^[Aa]n?%s+", "")
-        stripped = string.gsub(stripped, "^[Ss]ome%s+", "")
-        return stripped
-    end
+    
+    local oldCleaned
+    repeat
+        oldCleaned = cleaned
+        cleaned = string.gsub(cleaned, "^[Cc]reate%s+", "")
+        cleaned = string.gsub(cleaned, "^[Mm]ake%s+", "")
+        cleaned = string.gsub(cleaned, "^[Cc]raft%s+", "")
+        cleaned = string.gsub(cleaned, "^[Cc]ook%s+", "")
+        cleaned = string.gsub(cleaned, "^[Aa]n?%s+", "")
+        cleaned = string.gsub(cleaned, "^[Ss]ome%s+", "")
+    until oldCleaned == cleaned
+    
     return cleaned
 end
 
@@ -137,7 +148,8 @@ function Profesjonell.FindRecipeKeysByExactName(name)
         for rKey, _ in pairs(ProfesjonellDB) do
             local rName = Profesjonell.GetNameFromKey(rKey)
             local cleanRName = Profesjonell.StripPrefix(rName)
-            if string.lower(cleanRName) == searchName then
+            local lowerRName = string.lower(cleanRName)
+            if lowerRName == searchName then
                 table.insert(keys, rKey)
             end
         end
@@ -367,48 +379,42 @@ function Profesjonell.GetNameFromKey(key)
     local _, _, type, id = string.find(key, "([^:]+):(%d+)")
     if not type or not id then return key end
 
+    local nameFound = nil
+
     -- Handle items
     if type == "item" or type == "i" then
-        local name = GetItemInfo(id)
-        if name then 
-            nameCache[key] = name
-            return name 
+        nameFound = GetItemInfo(id)
+    end
+    
+    if not nameFound then
+        -- Handle spells and enchants via tooltip
+        local fullType = fullTypes[type] or type
+        local toTry = {}
+        if fullType == "spell" then
+            table.insert(toTry, "spell:" .. id)
+        elseif fullType == "enchant" then
+            table.insert(toTry, "spell:" .. id)
+            table.insert(toTry, "enchant:" .. id)
+        else
+            table.insert(toTry, fullType .. ":" .. id)
         end
-    end
-    
-    -- Handle spells and enchants
-    local fullTypes = {
-        s = "spell",
-        spell = "spell",
-        e = "enchant",
-        enchant = "enchant"
-    }
-    local fullType = fullTypes[type] or type
-    
-    local toTry = {}
-    if fullType == "spell" then
-        table.insert(toTry, "spell:" .. id)
-    elseif fullType == "enchant" then
-        -- Enchants in 1.12 are often spells, try both
-        table.insert(toTry, "spell:" .. id)
-        table.insert(toTry, "enchant:" .. id)
-    else
-        table.insert(toTry, fullType .. ":" .. id)
-    end
 
-    for _, link in ipairs(toTry) do
-        tooltip:ClearLines()
-        if pcall(tooltip.SetHyperlink, tooltip, link) then
-            local textObj = _G["ProfesjonellTooltipTextLeft1"]
-            local name = textObj and textObj:GetText()
-            if name and name ~= "" and name ~= "Unknown" then 
-                nameCache[key] = name
-                return name 
+        for _, link in ipairs(toTry) do
+            tooltip:ClearLines()
+            if pcall(tooltip.SetHyperlink, tooltip, link) then
+                local textObj = _G["ProfesjonellTooltipTextLeft1"]
+                local name = textObj and textObj:GetText()
+                if name and name ~= "" and name ~= "Unknown" and not string.find(name, "Retrieving") then 
+                    nameFound = name
+                    break
+                end
             end
         end
     end
-    
-    return "Unknown (" .. key .. ")"
+
+    local result = nameFound or ("Unknown (" .. key .. ")")
+    nameCache[key] = result
+    return result
 end
 
 function Profesjonell.GetLinkFromKey(key)
@@ -416,7 +422,8 @@ function Profesjonell.GetLinkFromKey(key)
     if not name or string.find(name, "^Unknown") then return nil end
     
     local _, _, type, id = string.find(key, "([^:]+):(%d+)")
-    if type == "i" or type == "item" then
+    local fType = fullTypes[type] or type
+    if fType == "item" then
         local nameFromAPI, link, rarity = GetItemInfo(id)
         if link then 
             if string.find(link, "|H") then
@@ -433,66 +440,89 @@ function Profesjonell.GetLinkFromKey(key)
         -- Fallback construction if link is not yet in cache
         -- Vanilla 1.12 uses 3 segments: item:id:enchant:suffix:unique
         return "|cffffffff|Hitem:" .. id .. ":0:0:0|h[" .. name .. "]|h|r"
-    elseif type == "s" or type == "spell" then
+    elseif fType == "spell" then
         return "|cff71d5ff|Hspell:" .. id .. "|h[" .. name .. "]|h|r"
-    elseif type == "e" or type == "enchant" then
+    elseif fType == "enchant" then
         return "|cff71d5ff|Henchant:" .. id .. "|h[" .. name .. "]|h|r"
     end
     return nil
 end
 
 function Profesjonell.FindRecipeHolders(name)
-    local cleanName = Profesjonell.GetItemNameFromLink(name)
-    cleanName = Profesjonell.StripPrefix(cleanName)
-    local searchName = string.lower(cleanName)
-    
-    local words = {}
-    local gfindFunc = string.gfind or string.gmatch
-    for word in gfindFunc(searchName, "%S+") do
-        table.insert(words, word)
-    end
-    
-    local rosterReady = false
-    if Profesjonell.UpdateGuildRosterCache then
-        rosterReady = Profesjonell.UpdateGuildRosterCache()
-    end
-    
     local foundSet = {}
     local partialMatchesSets = {}
     local exactMatchName = nil
     local exactMatchLink = nil
     local partialLinks = {}
     
-    if ProfesjonellDB then
-        for rKey, holders in pairs(ProfesjonellDB) do
-            local rName = Profesjonell.GetNameFromKey(rKey)
-            local cleanRName = Profesjonell.StripPrefix(rName)
-            local lowerRName = string.lower(cleanRName)
-            
-            local isExact = (lowerRName == searchName)
-            local isPartial = false
-            if not isExact and table.getn(words) > 0 then
-                isPartial = true
-                for _, word in ipairs(words) do
-                    if not string.find(lowerRName, word, 1, true) then
-                        isPartial = false
-                        break
+    local cleanName = Profesjonell.GetItemNameFromLink(name)
+    cleanName = Profesjonell.StripPrefix(cleanName)
+    local searchName = string.lower(cleanName)
+
+    local rosterReady = false
+    if Profesjonell.UpdateGuildRosterCache then
+        rosterReady = Profesjonell.UpdateGuildRosterCache()
+    end
+
+    -- If name looks like a link, try to resolve it to specific keys first
+    local linkKeys = nil
+    if string.find(name, "|H") then
+        linkKeys = Profesjonell.ResolveRecipeKeysFromLink(name)
+    end
+
+    if linkKeys and table.getn(linkKeys) > 0 then
+        for _, key in ipairs(linkKeys) do
+            local holders = ProfesjonellDB[key]
+            if holders then
+                local rName = Profesjonell.GetNameFromKey(key)
+                local link = Profesjonell.GetLinkFromKey(key)
+                exactMatchName = Profesjonell.StripPrefix(rName)
+                exactMatchLink = link
+                for charName, _ in pairs(holders) do
+                    if not rosterReady or (Profesjonell.GuildRosterCache and Profesjonell.GuildRosterCache[charName]) then
+                        foundSet[charName] = true
                     end
                 end
             end
-            
-            if isExact or isPartial then
-                local link = Profesjonell.GetLinkFromKey(rKey)
-                for charName, _ in pairs(holders) do
-                    if not rosterReady or (Profesjonell.GuildRosterCache and Profesjonell.GuildRosterCache[charName]) then
-                        if isExact then
-                            exactMatchName = cleanRName
-                            exactMatchLink = link
-                            foundSet[charName] = true
-                        else
-                            if not partialMatchesSets[cleanRName] then partialMatchesSets[cleanRName] = {} end
-                            partialLinks[cleanRName] = link
-                            partialMatchesSets[cleanRName][charName] = true
+        end
+    else
+        local words = {}
+        local gfindFunc = string.gfind or string.gmatch
+        for word in gfindFunc(searchName, "%S+") do
+            table.insert(words, word)
+        end
+        
+        if ProfesjonellDB then
+            for rKey, holders in pairs(ProfesjonellDB) do
+                local rName = Profesjonell.GetNameFromKey(rKey)
+                local cleanRName = Profesjonell.StripPrefix(rName)
+                local lowerRName = string.lower(cleanRName)
+                
+                local isExact = (lowerRName == searchName)
+                local isPartial = false
+                if not isExact and table.getn(words) > 0 then
+                    isPartial = true
+                    for _, word in ipairs(words) do
+                        if not string.find(lowerRName, word, 1, true) then
+                            isPartial = false
+                            break
+                        end
+                    end
+                end
+                
+                if isExact or isPartial then
+                    local link = Profesjonell.GetLinkFromKey(rKey)
+                    for charName, _ in pairs(holders) do
+                        if not rosterReady or (Profesjonell.GuildRosterCache and Profesjonell.GuildRosterCache[charName]) then
+                            if isExact then
+                                exactMatchName = cleanRName
+                                exactMatchLink = link
+                                foundSet[charName] = true
+                            else
+                                if not partialMatchesSets[cleanRName] then partialMatchesSets[cleanRName] = {} end
+                                partialLinks[cleanRName] = link
+                                partialMatchesSets[cleanRName][charName] = true
+                            end
                         end
                     end
                 end

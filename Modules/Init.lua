@@ -14,7 +14,6 @@ Profesjonell.Version = (GetAddOnMetadata and GetAddOnMetadata("Profesjonell", "V
 Profesjonell.PendingReplies = Profesjonell.PendingReplies or {}
 Profesjonell.SyncSources = Profesjonell.SyncSources or {}
 Profesjonell.GuildRosterCache = Profesjonell.GuildRosterCache or {}
-Profesjonell.RecipesToShare = Profesjonell.RecipesToShare or {}
 
 -- Safe Print function
 function Profesjonell.Print(msg)

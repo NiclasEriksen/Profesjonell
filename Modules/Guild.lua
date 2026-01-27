@@ -8,6 +8,7 @@ if Profesjonell.Log then
 end
 
 Profesjonell.GuildRosterCache = {}
+Profesjonell.GuildRosterRankCache = {}
 Profesjonell.LastRosterUpdate = 0
 Profesjonell.LastRosterRequest = 0
 
@@ -47,10 +48,12 @@ function Profesjonell.UpdateGuildRosterCache()
     end
 
     Profesjonell.GuildRosterCache = {}
+    Profesjonell.GuildRosterRankCache = {}
     for i = 1, num do
-        local name, _, _, _, class = GetGuildRosterInfo(i)
+        local name, rank, rankIndex, _, class = GetGuildRosterInfo(i)
         if name then
             Profesjonell.GuildRosterCache[name] = class
+            Profesjonell.GuildRosterRankCache[name] = { rank = rank, rankIndex = rankIndex }
         end
     end
 
@@ -71,25 +74,16 @@ end
 function Profesjonell.IsOfficer(name)
     if not Profesjonell.GetGuildName() then return false end
     
-    local showOffline = GetGuildRosterShowOffline()
-    if not showOffline then
-        SetGuildRosterShowOffline(1)
+    if not Profesjonell.UpdateGuildRosterCache() then
+        return false
     end
-    
-    local isOfficer = false
-    for i = 1, GetNumGuildMembers() do
-        local gName, rank, rankIndex = GetGuildRosterInfo(i)
-        if gName == name then
-            if rankIndex <= 1 or (rank and (string.find(string.lower(rank), "officer") or string.find(string.lower(rank), "master"))) then
-                isOfficer = true
-            end
-            break
+
+    local info = Profesjonell.GuildRosterRankCache[name]
+    if info then
+        if info.rankIndex <= 1 or (info.rank and (string.find(string.lower(info.rank), "officer") or string.find(string.lower(info.rank), "master"))) then
+            return true
         end
     end
     
-    if not showOffline then
-        SetGuildRosterShowOffline(0)
-    end
-    
-    return isOfficer
+    return false
 end

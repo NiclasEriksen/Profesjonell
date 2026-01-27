@@ -15,9 +15,9 @@ function Profesjonell.GetGuildName()
     return GetGuildInfo("player")
 end
 
+local prefixes = {"Recipe: ", "Pattern: ", "Plans: ", "Schematic: ", "Manual: ", "Formula: "}
 function Profesjonell.StripPrefix(s)
     if not s then return nil end
-    local prefixes = {"Recipe: ", "Pattern: ", "Plans: ", "Schematic: ", "Manual: ", "Formula: "}
     local lowerS = string.lower(s)
     for _, p in ipairs(prefixes) do
         local lowerP = string.lower(p)
@@ -26,6 +26,10 @@ function Profesjonell.StripPrefix(s)
         end
     end
     return s
+end
+
+function Profesjonell.IsModern(version)
+    return version and Profesjonell.CompareVersions(version, "0.34") >= 0
 end
 
 function Profesjonell.GetItemNameFromLink(link)
@@ -62,6 +66,28 @@ function Profesjonell.CompareVersions(v1, v2)
     if min1 > min2 then return 1 end
     if min1 < min2 then return -1 end
     return 0
+end
+
+function Profesjonell.GetPlayerOffset()
+    local playerOffset = 0
+    local playerName = Profesjonell.GetPlayerName()
+    if playerName then
+        for i=1, string.len(playerName) do
+            playerOffset = math.mod(playerOffset + string.byte(playerName, i), 50)
+        end
+        playerOffset = playerOffset / 100
+    end
+    return playerOffset
+end
+
+function Profesjonell.GetSyncDelay(base, range, priority)
+    base = base or 0.5
+    range = range or 2
+    if priority then
+        base = base * 0.5
+        range = range * 0.5
+    end
+    return base + Profesjonell.GetPlayerOffset() + math.random() * range
 end
 
 local classColors = {}
