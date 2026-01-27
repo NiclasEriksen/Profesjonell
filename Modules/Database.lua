@@ -413,7 +413,9 @@ function Profesjonell.GetNameFromKey(key)
     end
 
     local result = nameFound or ("Unknown (" .. key .. ")")
-    nameCache[key] = result
+    if nameFound then
+        nameCache[key] = result
+    end
     return result
 end
 
