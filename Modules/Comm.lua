@@ -577,11 +577,7 @@ function Profesjonell.OnAddonMessage(message, sender)
         local _, _, charName, recipeKey = string.find(message, "^REMOVE_RECIPE:([^:]+):(.+)$")
         if Profesjonell.IsOfficer(sender) then
             -- Normalize recipeKey for backward compatibility
-            local _, _, type, idNum = string.find(recipeKey, "([^:]+):(%d+)")
-            if type == "item" then recipeKey = "i:" .. idNum
-            elseif type == "spell" then recipeKey = "s:" .. idNum
-            elseif type == "enchant" then recipeKey = "e:" .. idNum
-            end
+            recipeKey = Profesjonell.GetIDFromLink(recipeKey) or recipeKey
 
             if ProfesjonellDB[recipeKey] and ProfesjonellDB[recipeKey][charName] then
                 ProfesjonellDB[recipeKey][charName] = nil
@@ -602,11 +598,18 @@ function Profesjonell.OnAddonMessage(message, sender)
             if not Profesjonell.RemoteVersions[sender] then
                 Profesjonell.RemoteVersions[sender] = "0.37"
             end
+            
+            local amIPending = Profesjonell.Frame.pendingP and Profesjonell.Frame.pendingP[queryKey]
             if Profesjonell.PendingReplies[queryKey] then
-                Profesjonell.Debug("Received P for '" .. queryKey .. "' from " .. sender .. ". Cancelling local reply.")
-                Profesjonell.PendingReplies[queryKey] = nil
+                if amIPending or sender < Profesjonell.GetPlayerName() then
+                    Profesjonell.Debug("Received P for '" .. queryKey .. "' from " .. sender .. ". Cancelling local reply.")
+                    Profesjonell.PendingReplies[queryKey] = nil
+                else
+                    Profesjonell.Debug("Received P for '" .. queryKey .. "' from " .. sender .. " but we have priority. Ignoring.")
+                end
             end
-            if Profesjonell.Frame.pendingP and Profesjonell.Frame.pendingP[queryKey] then
+            
+            if amIPending then
                 Profesjonell.Frame.pendingP[queryKey] = nil
             end
         end

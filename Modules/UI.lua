@@ -35,6 +35,9 @@ function Profesjonell.OnUpdate()
         
         if Profesjonell.SyncNewRecipesCount > 0 then
             Profesjonell.Print("Sync complete: Added " .. Profesjonell.SyncNewRecipesCount .. " new recipes from " .. table.concat(Profesjonell.ColorizeList(sourceList), ", ") .. ".")
+            if Profesjonell.ResolveUnknownNames then
+                Profesjonell.ResolveUnknownNames(2)
+            end
         end
         
         Profesjonell.SyncNewRecipesCount = 0
@@ -133,6 +136,9 @@ function Profesjonell.OnGuildChat(msg, sender)
         for queryKey, _ in pairs(Profesjonell.PendingReplies) do
             if string.find(lowerMsg, queryKey, 1, true) then
                 Profesjonell.PendingReplies[queryKey] = nil
+                if Profesjonell.Frame.pendingP and Profesjonell.Frame.pendingP[queryKey] then
+                    Profesjonell.Frame.pendingP[queryKey] = nil
+                end
             end
         end
     end

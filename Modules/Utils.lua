@@ -45,9 +45,9 @@ function Profesjonell.GetIDFromLink(link)
         _, _, type, id = string.find(link, "^(%a+):(%d+)")
     end
     if type and id then
-        if type == "item" then type = "i"
-        elseif type == "spell" then type = "s"
-        elseif type == "enchant" then type = "e"
+        type = string.lower(type)
+        if type == "item" or type == "i" then type = "i"
+        elseif type == "spell" or type == "s" or type == "enchant" or type == "e" then type = "s"
         end
         return type .. ":" .. id
     end

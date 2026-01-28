@@ -30,13 +30,25 @@ frame:SetScript("OnEvent", function()
     if event == "ADDON_LOADED" and arg1 == "Profesjonell" then
         if not ProfesjonellDB then ProfesjonellDB = {} end
         if not ProfesjonellConfig then ProfesjonellConfig = {} end
+        
+        -- Link persistent NameCache
+        if not ProfesjonellConfig.nameCache then ProfesjonellConfig.nameCache = {} end
+        if Profesjonell.NameCache then
+            -- Copy any names cached during loading into the persistent cache
+            for k, v in pairs(Profesjonell.NameCache) do
+                ProfesjonellConfig.nameCache[k] = v
+            end
+        end
+        Profesjonell.NameCache = ProfesjonellConfig.nameCache
+
         Profesjonell.Print(Profesjonell.Version .. " loaded.")
 
         -- Migration check
-        if not ProfesjonellConfig.version or ProfesjonellConfig.version < "0.27" then
+        if not ProfesjonellConfig.version or Profesjonell.CompareVersions(ProfesjonellConfig.version, Profesjonell.Version) < 0 then
             if Profesjonell.MigrateDatabase then
                 Profesjonell.MigrateDatabase()
             end
+            ProfesjonellConfig.version = Profesjonell.Version
         end
 
         if Profesjonell.WipeDatabaseIfGuildChanged then

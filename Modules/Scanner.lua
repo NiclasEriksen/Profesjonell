@@ -40,6 +40,11 @@ function Profesjonell.ScanRecipes(isCraft)
                 -- Use ID as primary key
                 local key = id
                 
+                -- Cache the name to ensure it's available for queries even if tooltip resolution fails
+                if name and name ~= "" and Profesjonell.NameCache then
+                    Profesjonell.NameCache[key] = name
+                end
+
                 -- Cleanup legacy name-based entry for the player
                 if ProfesjonellDB[name] and ProfesjonellDB[name][playerName] then
                     ProfesjonellDB[name][playerName] = nil

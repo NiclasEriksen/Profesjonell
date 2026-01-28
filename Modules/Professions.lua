@@ -7,7 +7,7 @@ if Profesjonell.Log then
 end
 
 Profesjonell.ProfessionSignatures = Profesjonell.ProfessionSignatures or {
-    enchanting = {"e:7421", "e:7795"},
+    enchanting = {"s:7421", "s:7795"},
     tailoring = {"i:2996", "i:2997"},
     jewelcrafting = {"i:55150", "i:81032"},
     blacksmithing = {"i:2862", "i:3239"},

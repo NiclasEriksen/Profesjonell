@@ -22,8 +22,8 @@ Profesjonell.TooltipCacheEpoch = ProfesjonellConfig.tooltipCacheEpoch
 local tooltip = CreateFrame("GameTooltip", "ProfesjonellTooltip", nil, "GameTooltipTemplate")
 tooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
 
-Profesjonell.NameCache = {}
-local nameCache = Profesjonell.NameCache
+Profesjonell.NameCache = Profesjonell.NameCache or {}
+local nameCache = Profesjonell.NameCache -- This will be updated in ADDON_LOADED but we use it via Profesjonell.NameCache in functions to be safe
 local tooltipLineMax = 30
 local fullTypes = {
     s = "spell", spell = "spell",
@@ -35,7 +35,7 @@ function Profesjonell.InvalidateTooltipCache()
     Profesjonell.TooltipRecipeCache = {}
     ProfesjonellConfig.tooltipRecipeCache = Profesjonell.TooltipRecipeCache
     Profesjonell.NameCache = {}
-    nameCache = Profesjonell.NameCache
+    if ProfesjonellConfig then ProfesjonellConfig.nameCache = Profesjonell.NameCache end
     Profesjonell.TooltipCacheEpoch = (Profesjonell.TooltipCacheEpoch or 0) + 1
     ProfesjonellConfig.tooltipCacheEpoch = Profesjonell.TooltipCacheEpoch
     if Profesjonell.InvalidateProfessionCache then
@@ -373,7 +373,7 @@ function Profesjonell.ResolveRecipeKeysFromTooltip(tooltip)
 end
 
 function Profesjonell.GetNameFromKey(key)
-    if nameCache[key] then return nameCache[key] end
+    if Profesjonell.NameCache[key] then return Profesjonell.NameCache[key] end
     if not string.find(key, ":") then return key end
     
     local _, _, type, id = string.find(key, "([^:]+):(%d+)")
@@ -414,9 +414,65 @@ function Profesjonell.GetNameFromKey(key)
 
     local result = nameFound or ("Unknown (" .. key .. ")")
     if nameFound then
-        nameCache[key] = result
+        Profesjonell.NameCache[key] = result
     end
     return result
+end
+
+function Profesjonell.ResolveUnknownNames(retries)
+    if not ProfesjonellDB or not Profesjonell.NameCache then return end
+    retries = retries or 0
+    
+    local keysToResolve = {}
+    for key in pairs(ProfesjonellDB) do
+        if not Profesjonell.NameCache[key] then
+            table.insert(keysToResolve, key)
+        end
+    end
+    
+    local total = table.getn(keysToResolve)
+    if total == 0 then return end
+    
+    Profesjonell.Debug("Background resolution started for " .. total .. " keys.")
+    
+    local index = 1
+    local frame = CreateFrame("Frame")
+    frame:SetScript("OnUpdate", function()
+        local chunk = 0
+        -- Limit to 5 per frame to be very safe about performance
+        while index <= total and chunk < 5 do
+            local key = keysToResolve[index]
+            Profesjonell.GetNameFromKey(key)
+            index = index + 1
+            chunk = chunk + 1
+        end
+        
+        if index > total then
+            frame:SetScript("OnUpdate", nil)
+            frame:Hide()
+            Profesjonell.Debug("Background resolution pass complete.")
+            
+            if retries > 0 then
+                -- Check if we still have unknowns
+                local remaining = 0
+                for key in pairs(ProfesjonellDB) do
+                    if not Profesjonell.NameCache[key] then remaining = remaining + 1 end
+                end
+                
+                if remaining > 0 then
+                    local retryFrame = CreateFrame("Frame")
+                    local wait = GetTime() + 10
+                    retryFrame:SetScript("OnUpdate", function()
+                        if GetTime() >= wait then
+                            retryFrame:SetScript("OnUpdate", nil)
+                            retryFrame:Hide()
+                            Profesjonell.ResolveUnknownNames(retries - 1)
+                        end
+                    end)
+                end
+            end
+        end
+    end)
 end
 
 function Profesjonell.GetLinkFromKey(key)
@@ -633,7 +689,7 @@ function Profesjonell.MigrateDatabase()
     for key, _ in pairs(ProfesjonellDB) do
         if string.find(key, ":") then
             local _, _, type, id = string.find(key, "([^:]+):(%d+)")
-            if type == "item" or type == "spell" or type == "enchant" then
+            if type == "item" or type == "spell" or type == "enchant" or type == "e" then
                 table.insert(oldKeys, key)
             end
         end
@@ -643,13 +699,18 @@ function Profesjonell.MigrateDatabase()
         local _, _, type, id = string.find(oldKey, "([^:]+):(%d+)")
         local newType = type
         if type == "item" then newType = "i"
-        elseif type == "spell" then newType = "s"
-        elseif type == "enchant" then newType = "e"
+        elseif type == "spell" or type == "enchant" or type == "e" then newType = "s"
         end
         local newKey = newType .. ":" .. id
         
         if newKey ~= oldKey then
             Profesjonell.Debug("Converting prefix: " .. oldKey .. " -> " .. newKey)
+            
+            -- Carry over cached name to the new key
+            if Profesjonell.NameCache[oldKey] and not Profesjonell.NameCache[newKey] then
+                Profesjonell.NameCache[newKey] = Profesjonell.NameCache[oldKey]
+            end
+
             if not ProfesjonellDB[newKey] then ProfesjonellDB[newKey] = {} end
             for charName, _ in pairs(ProfesjonellDB[oldKey]) do
                 ProfesjonellDB[newKey][charName] = true
@@ -736,5 +797,15 @@ function Profesjonell.MigrateDatabase()
         if removedCount > 0 then
             Profesjonell.Print("Removed " .. removedCount .. " unresolvable name-based entries.")
         end
+        
+        -- Final name cache cleanup and persistence sync
+        if ProfesjonellConfig then
+            ProfesjonellConfig.nameCache = Profesjonell.NameCache
+        end
+    end
+
+    -- Trigger background resolution for any remaining unknown names
+    if Profesjonell.ResolveUnknownNames then
+        Profesjonell.ResolveUnknownNames(3)
     end
 end
