@@ -33,11 +33,13 @@ local fullTypes = {
 
 function Profesjonell.InvalidateTooltipCache()
     Profesjonell.TooltipRecipeCache = {}
-    ProfesjonellConfig.tooltipRecipeCache = Profesjonell.TooltipRecipeCache
-    Profesjonell.NameCache = {}
-    if ProfesjonellConfig then ProfesjonellConfig.nameCache = Profesjonell.NameCache end
+    if ProfesjonellConfig then
+        ProfesjonellConfig.tooltipRecipeCache = Profesjonell.TooltipRecipeCache
+    end
     Profesjonell.TooltipCacheEpoch = (Profesjonell.TooltipCacheEpoch or 0) + 1
-    ProfesjonellConfig.tooltipCacheEpoch = Profesjonell.TooltipCacheEpoch
+    if ProfesjonellConfig then
+        ProfesjonellConfig.tooltipCacheEpoch = Profesjonell.TooltipCacheEpoch
+    end
     if Profesjonell.InvalidateProfessionCache then
         Profesjonell.InvalidateProfessionCache()
     end
@@ -393,9 +395,7 @@ function Profesjonell.GetNameFromKey(key)
         -- Handle spells and enchants via tooltip
         local fullType = fullTypes[type] or type
         local toTry = {}
-        if fullType == "spell" then
-            table.insert(toTry, "spell:" .. id)
-        elseif fullType == "enchant" then
+        if fullType == "spell" or fullType == "enchant" then
             table.insert(toTry, "spell:" .. id)
             table.insert(toTry, "enchant:" .. id)
         else
@@ -417,10 +417,16 @@ function Profesjonell.GetNameFromKey(key)
 
     if nameFound then
         Profesjonell.NameCache[key] = nameFound
+        if ProfesjonellConfig then ProfesjonellConfig.nameCache = Profesjonell.NameCache end
         return nameFound
     end
 
-    return Profesjonell.NameCache[key] or ("Unknown (" .. key .. ")")
+    if not Profesjonell.NameCache[key] then
+        Profesjonell.NameCache[key] = "Unknown (" .. key .. ")"
+        if ProfesjonellConfig then ProfesjonellConfig.nameCache = Profesjonell.NameCache end
+    end
+
+    return Profesjonell.NameCache[key]
 end
 
 function Profesjonell.ResolveUnknownNames(retries)
@@ -436,11 +442,29 @@ function Profesjonell.ResolveUnknownNames(retries)
     
     local keysToResolve = {}
     for key in pairs(ProfesjonellDB) do
-        if not Profesjonell.NameCache[key] then
+        if not Profesjonell.NameCache[key] or string.find(Profesjonell.NameCache[key], "^Unknown") then
             table.insert(keysToResolve, key)
         end
     end
     
+    -- Also check for entries that are just empty strings or only whitespace
+    for key, name in pairs(Profesjonell.NameCache) do
+        if type(name) == "string" and string.find(name, "^%s*$") then
+            if not ProfesjonellDB[key] then
+                -- Cleanup NameCache if it's not in DB and is empty
+                Profesjonell.NameCache[key] = nil
+            else
+                local alreadyAdded = false
+                for _, k in ipairs(keysToResolve) do
+                    if k == key then alreadyAdded = true break end
+                end
+                if not alreadyAdded then
+                    table.insert(keysToResolve, key)
+                end
+            end
+        end
+    end
+
     local total = table.getn(keysToResolve)
     if total == 0 then return end
     
@@ -470,7 +494,14 @@ function Profesjonell.ResolveUnknownNames(retries)
                 -- Check if we still have unknowns
                 local remaining = 0
                 for key in pairs(ProfesjonellDB) do
-                    if not Profesjonell.NameCache[key] then remaining = remaining + 1 end
+                    if not Profesjonell.NameCache[key] or string.find(Profesjonell.NameCache[key], "^Unknown") then
+                        remaining = remaining + 1
+                    end
+                end
+                for key, name in pairs(Profesjonell.NameCache) do
+                    if ProfesjonellDB[key] and type(name) == "string" and string.find(name, "^%s*$") then
+                        remaining = remaining + 1
+                    end
                 end
                 
                 if remaining > 0 then
@@ -804,6 +835,11 @@ function Profesjonell.MigrateDatabase()
         end
     end
 
+    -- Cleanup and persistence sync
+    if ProfesjonellConfig then
+        ProfesjonellConfig.nameCache = Profesjonell.NameCache
+    end
+    
     if migratedCount > 0 or removedCount > 0 then
         Profesjonell.Print("Database migration complete.")
         if migratedCount > 0 then
@@ -813,7 +849,7 @@ function Profesjonell.MigrateDatabase()
             Profesjonell.Print("Removed " .. removedCount .. " unresolvable name-based entries.")
         end
         
-        -- Final name cache cleanup and persistence sync
+        -- Cleanup and persistence sync
         if ProfesjonellConfig then
             ProfesjonellConfig.nameCache = Profesjonell.NameCache
         end

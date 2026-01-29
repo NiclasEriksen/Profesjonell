@@ -95,6 +95,12 @@ end
 function Profesjonell.OnPlayerEnteringWorld()
     Profesjonell.Frame.enteredWorldTime = GetTime()
     Profesjonell.WipeDatabaseIfGuildChanged()
+    
+    -- Trigger background resolution on login/reload
+    if Profesjonell.ResolveUnknownNames then
+        Profesjonell.ResolveUnknownNames(2)
+    end
+
     local now = GetTime()
     if not Profesjonell.LastSyncRequest or (now - Profesjonell.LastSyncRequest > 30) then
         Profesjonell.Frame.broadcastHashTime = now + 10
