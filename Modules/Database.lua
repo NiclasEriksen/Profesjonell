@@ -373,7 +373,10 @@ function Profesjonell.ResolveRecipeKeysFromTooltip(tooltip)
 end
 
 function Profesjonell.GetNameFromKey(key)
-    if Profesjonell.NameCache[key] then return Profesjonell.NameCache[key] end
+    if Profesjonell.NameCache[key] and not string.find(Profesjonell.NameCache[key], "^Unknown") then 
+        return Profesjonell.NameCache[key] 
+    end
+    
     if not string.find(key, ":") then return key end
     
     local _, _, type, id = string.find(key, "([^:]+):(%d+)")
@@ -412,15 +415,23 @@ function Profesjonell.GetNameFromKey(key)
         end
     end
 
-    local result = nameFound or ("Unknown (" .. key .. ")")
     if nameFound then
-        Profesjonell.NameCache[key] = result
+        Profesjonell.NameCache[key] = nameFound
+        return nameFound
     end
-    return result
+
+    return Profesjonell.NameCache[key] or ("Unknown (" .. key .. ")")
 end
 
 function Profesjonell.ResolveUnknownNames(retries)
     if not ProfesjonellDB or not Profesjonell.NameCache then return end
+    
+    -- Prevent overlapping resolution passes
+    if Profesjonell.IsResolving then 
+        Profesjonell.Debug("Background resolution already in progress, skipping trigger.")
+        return 
+    end
+
     retries = retries or 0
     
     local keysToResolve = {}
@@ -433,8 +444,10 @@ function Profesjonell.ResolveUnknownNames(retries)
     local total = table.getn(keysToResolve)
     if total == 0 then return end
     
-    Profesjonell.Debug("Background resolution started for " .. total .. " keys.")
+    local label = (retries > 0) and (" (retry " .. retries .. ")") or ""
+    Profesjonell.Debug("Background resolution started for " .. total .. " keys" .. label .. ".")
     
+    Profesjonell.IsResolving = true
     local index = 1
     local frame = CreateFrame("Frame")
     frame:SetScript("OnUpdate", function()
@@ -450,6 +463,7 @@ function Profesjonell.ResolveUnknownNames(retries)
         if index > total then
             frame:SetScript("OnUpdate", nil)
             frame:Hide()
+            Profesjonell.IsResolving = false
             Profesjonell.Debug("Background resolution pass complete.")
             
             if retries > 0 then
@@ -460,6 +474,7 @@ function Profesjonell.ResolveUnknownNames(retries)
                 end
                 
                 if remaining > 0 then
+                    Profesjonell.Debug("Still " .. remaining .. " unknown keys, scheduling retry.")
                     local retryFrame = CreateFrame("Frame")
                     local wait = GetTime() + 10
                     retryFrame:SetScript("OnUpdate", function()
