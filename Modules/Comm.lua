@@ -449,6 +449,12 @@ function Profesjonell.OnAddonMessage(message, sender)
     elseif string.sub(message, 1, 2) == "C:" then
         local data = string.sub(message, 3)
         do
+            -- Skip sync with incompatible old versions
+            if remoteVersion and Profesjonell.CompareVersions(remoteVersion, "0.34") < 0 then
+                Profesjonell.Debug("Ignoring C: from incompatible version " .. remoteVersion .. " from " .. sender)
+                return
+            end
+
             if Profesjonell.Frame.pendingC then
                 Profesjonell.Debug("Received C from " .. sender .. ". Cancelling our own C response.")
                 Profesjonell.Frame.pendingC = nil
