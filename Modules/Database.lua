@@ -19,12 +19,35 @@ ProfesjonellConfig.tooltipCacheEpoch = ProfesjonellConfig.tooltipCacheEpoch or 0
 Profesjonell.TooltipRecipeCache = ProfesjonellConfig.tooltipRecipeCache
 Profesjonell.TooltipCacheEpoch = ProfesjonellConfig.tooltipCacheEpoch
 
+-- Tooltip cache size management
+local TOOLTIP_CACHE_MAX_SIZE = 500
+Profesjonell.TooltipCacheAccessOrder = Profesjonell.TooltipCacheAccessOrder or {}
+
 local tooltip = CreateFrame("GameTooltip", "ProfesjonellTooltip", nil, "GameTooltipTemplate")
 tooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
 
 Profesjonell.NameCache = Profesjonell.NameCache or {}
 local nameCache = Profesjonell.NameCache -- This will be updated in ADDON_LOADED but we use it via Profesjonell.NameCache in functions to be safe
 local tooltipLineMax = 30
+
+-- Hash caching
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+
+-- Pre-compiled patterns for performance
+local PATTERN_COLOR_CODE = "|c%x%x%x%x%x%x%x%x"
+local PATTERN_COLOR_RESET = "|r"
+local PATTERN_PARENS = "%s*%b()%s*$"
+local PATTERN_TRAILING_SPACE = "%s+$"
+local PATTERN_LEADING_SPACE = "^%s+"
+local PATTERN_SERVER_SUFFIX = "%-.*$"
+local PATTERN_USE_TEACHES = "^Use:%s*Teaches you how to%s+(.+)$"
+local PATTERN_TEACHES_A = "^Teaches:?%s*(.+)$"
+local PATTERN_TEACHES_B = "^Teaches you how to create:?%s*(.+)$"
+local PATTERN_CREATED_BY = "^Created by:?%s*(.+)$"
+local PATTERN_TRANSMUTE = "^Transmute%s+"
+local PATTERN_TRANSMUTE_COLON = "^Transmute:%s+"
+
 local fullTypes = {
     s = "spell", spell = "spell",
     e = "enchant", enchant = "enchant",
@@ -33,6 +56,7 @@ local fullTypes = {
 
 function Profesjonell.InvalidateTooltipCache()
     Profesjonell.TooltipRecipeCache = {}
+    Profesjonell.TooltipCacheAccessOrder = {}
     if ProfesjonellConfig then
         ProfesjonellConfig.tooltipRecipeCache = Profesjonell.TooltipRecipeCache
     end
@@ -40,6 +64,9 @@ function Profesjonell.InvalidateTooltipCache()
     if ProfesjonellConfig then
         ProfesjonellConfig.tooltipCacheEpoch = Profesjonell.TooltipCacheEpoch
     end
+    -- Invalidate hash cache when database changes
+    Profesjonell.CachedDatabaseHash = nil
+    Profesjonell.CachedCharacterHashes = nil
     if Profesjonell.InvalidateProfessionCache then
         Profesjonell.InvalidateProfessionCache()
     end
@@ -47,10 +74,32 @@ end
 
 local function CacheResolvedKeys(cacheKey, keys)
     if not cacheKey then return end
+
+    -- Remove existing entry from access order to avoid duplicates
+    if Profesjonell.TooltipRecipeCache[cacheKey] then
+        for i = table.getn(Profesjonell.TooltipCacheAccessOrder), 1, -1 do
+            if Profesjonell.TooltipCacheAccessOrder[i] == cacheKey then
+                table.remove(Profesjonell.TooltipCacheAccessOrder, i)
+                break
+            end
+        end
+    end
+
+    -- Enforce cache size limit with LRU eviction
+    while table.getn(Profesjonell.TooltipCacheAccessOrder) >= TOOLTIP_CACHE_MAX_SIZE do
+        local oldestKey = table.remove(Profesjonell.TooltipCacheAccessOrder, 1)
+        if oldestKey then
+            Profesjonell.TooltipRecipeCache[oldestKey] = nil
+        end
+    end
+
     Profesjonell.TooltipRecipeCache[cacheKey] = {
         keys = keys or {},
         epoch = Profesjonell.TooltipCacheEpoch
     }
+
+    -- Track access order for LRU
+    table.insert(Profesjonell.TooltipCacheAccessOrder, cacheKey)
 end
 
 local function GetCachedKeys(cacheKey)
@@ -94,20 +143,20 @@ local function ExtractTeachOrCreateName(lines)
     if not lines then return nil, nil end
     local teachName, createdByName
     for _, text in ipairs(lines) do
-        local stripped = string.gsub(text, "|c%x%x%x%x%x%x%x%x", "")
-        stripped = string.gsub(stripped, "|r", "")
-        stripped = string.gsub(stripped, "^%s+", "")
-        local _, _, useTeach = string.find(stripped, "^Use:%s*Teaches you how to%s+(.+)$")
+        local stripped = string.gsub(text, PATTERN_COLOR_CODE, "")
+        stripped = string.gsub(stripped, PATTERN_COLOR_RESET, "")
+        stripped = string.gsub(stripped, PATTERN_LEADING_SPACE, "")
+        local _, _, useTeach = string.find(stripped, PATTERN_USE_TEACHES)
         if not teachName then
-            local _, _, teachA = string.find(stripped, "^Teaches:?%s*(.+)$")
-            local _, _, teachB = string.find(stripped, "^Teaches you how to create:?%s*(.+)$")
+            local _, _, teachA = string.find(stripped, PATTERN_TEACHES_A)
+            local _, _, teachB = string.find(stripped, PATTERN_TEACHES_B)
             teachName = teachA or teachB
         end
         if not teachName and useTeach then
             teachName = useTeach
         end
         if not createdByName then
-            local _, _, created = string.find(stripped, "^Created by:?%s*(.+)$")
+            local _, _, created = string.find(stripped, PATTERN_CREATED_BY)
             createdByName = created
         end
         if teachName and createdByName then break end
@@ -473,7 +522,7 @@ function Profesjonell.ResolveUnknownNames(retries)
     
     Profesjonell.IsResolving = true
     local index = 1
-    local frame = CreateFrame("Frame")
+    local frame = Profesjonell.TimerFrames[2]
     frame:SetScript("OnUpdate", function()
         local chunk = 0
         -- Limit to 5 per frame to be very safe about performance
@@ -483,13 +532,12 @@ function Profesjonell.ResolveUnknownNames(retries)
             index = index + 1
             chunk = chunk + 1
         end
-        
+
         if index > total then
             frame:SetScript("OnUpdate", nil)
-            frame:Hide()
             Profesjonell.IsResolving = false
             Profesjonell.Debug("Background resolution pass complete.")
-            
+
             if retries > 0 then
                 -- Check if we still have unknowns
                 local remaining = 0
@@ -503,15 +551,14 @@ function Profesjonell.ResolveUnknownNames(retries)
                         remaining = remaining + 1
                     end
                 end
-                
+
                 if remaining > 0 then
                     Profesjonell.Debug("Still " .. remaining .. " unknown keys, scheduling retry.")
-                    local retryFrame = CreateFrame("Frame")
+                    local retryFrame = Profesjonell.TimerFrames[3]
                     local wait = GetTime() + 10
                     retryFrame:SetScript("OnUpdate", function()
                         if GetTime() >= wait then
                             retryFrame:SetScript("OnUpdate", nil)
-                            retryFrame:Hide()
                             Profesjonell.ResolveUnknownNames(retries - 1)
                         end
                     end)
@@ -673,6 +720,10 @@ function Profesjonell.WipeDatabaseIfGuildChanged()
 end
 
 function Profesjonell.GenerateDatabaseHash()
+    if Profesjonell.CachedDatabaseHash then
+        return Profesjonell.CachedDatabaseHash
+    end
+
     local charHashes = Profesjonell.GenerateCharacterHashes()
     if not charHashes then return nil end
 
@@ -681,18 +732,26 @@ function Profesjonell.GenerateDatabaseHash()
         table.insert(sortedChars, charName)
     end
     table.sort(sortedChars)
-    
+
     local hash = 0
     for _, charName in ipairs(sortedChars) do
         local charHashStr = charName .. ":" .. charHashes[charName]
-        for i = 1, string.len(charHashStr) do
+        local strLen = string.len(charHashStr)
+        for i = 1, strLen do
             hash = math.mod(hash * 33 + string.byte(charHashStr, i), 4294967296)
         end
     end
-    return string.format("%x", hash)
+
+    local result = string.format("%x", hash)
+    Profesjonell.CachedDatabaseHash = result
+    return result
 end
 
 function Profesjonell.GenerateCharacterHashes()
+    if Profesjonell.CachedCharacterHashes then
+        return Profesjonell.CachedCharacterHashes
+    end
+
     if not Profesjonell.UpdateGuildRosterCache or not Profesjonell.UpdateGuildRosterCache() then
         return nil
     end
@@ -709,18 +768,21 @@ function Profesjonell.GenerateCharacterHashes()
             end
         end
     end
-    
+
     local results = {}
     for charName, entries in pairs(charEntries) do
         table.sort(entries)
         local hash = 0
         for _, entry in ipairs(entries) do
-            for i = 1, string.len(entry) do
+            local entryLen = string.len(entry)
+            for i = 1, entryLen do
                 hash = math.mod(hash * 33 + string.byte(entry, i), 4294967296)
             end
         end
         results[charName] = string.format("%x", hash)
     end
+
+    Profesjonell.CachedCharacterHashes = results
     return results
 end
 

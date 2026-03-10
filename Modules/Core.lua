@@ -10,6 +10,14 @@ end
 local frame = CreateFrame("Frame")
 Profesjonell.Frame = frame
 
+-- Reusable timer frames for scheduled tasks to avoid creating many short-lived frames
+Profesjonell.TimerFrames = Profesjonell.TimerFrames or {}
+for i = 1, 4 do
+    if not Profesjonell.TimerFrames[i] then
+        Profesjonell.TimerFrames[i] = CreateFrame("Frame")
+    end
+end
+
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("TRADE_SKILL_SHOW")
 frame:RegisterEvent("TRADE_SKILL_UPDATE")

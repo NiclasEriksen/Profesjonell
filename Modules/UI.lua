@@ -169,8 +169,10 @@ local function FindKnownByLineIndex(tooltip)
     local tooltipName = tooltip:GetName()
     for i = 1, 30 do
         local textObj = _G[tooltipName .. "TextLeft" .. i]
-        local text = textObj and textObj:GetText()
-        if text and string.find(text, "^Known by") then
+        if not textObj then break end
+        local text = textObj:GetText()
+        if not text or text == "" then break end
+        if string.find(text, "^Known by") then
             return i
         end
     end
@@ -182,8 +184,10 @@ local function ClearKnownByLines(tooltip)
     local tooltipName = tooltip:GetName()
     for i = 1, 30 do
         local textObj = _G[tooltipName .. "TextLeft" .. i]
-        local text = textObj and textObj:GetText()
-        if text and string.find(text, "^Known by") then
+        if not textObj then break end
+        local text = textObj:GetText()
+        if not text or text == "" then break end
+        if string.find(text, "^Known by") then
             if textObj.SetText then
                 textObj:SetText("")
             end
@@ -568,7 +572,7 @@ SlashCmdList["PROFESJONELL"] = function(msg)
             end
 
             local index = 1
-            local purgeTimer = CreateFrame("Frame")
+            local purgeTimer = Profesjonell.TimerFrames[4]
             purgeTimer:SetScript("OnUpdate", function()
                 local chunkCount = 0
                 while index <= count and chunkCount < 5 do
@@ -585,7 +589,6 @@ SlashCmdList["PROFESJONELL"] = function(msg)
                 end
                 if index > count then
                     purgeTimer:SetScript("OnUpdate", nil)
-                    purgeTimer:Hide()
                     Profesjonell.BroadcastHash()
                     Profesjonell.Print("Purged " .. count .. " members.")
                 end

@@ -21,6 +21,14 @@ Profesjonell.ProfessionDetectCache = Profesjonell.ProfessionDetectCache or {}
 Profesjonell.SignatureIndex = Profesjonell.SignatureIndex or nil
 Profesjonell.SignatureIndexEpoch = Profesjonell.SignatureIndexEpoch or nil
 
+-- Pre-compiled patterns for performance
+local PATTERN_COLOR_CODE = "|c%x%x%x%x%x%x%x%x"
+local PATTERN_COLOR_RESET = "|r"
+local PATTERN_PARENS = "%s*%b()"
+local PATTERN_TRAILING_SPACE = "%s+$"
+local PATTERN_LEADING_SPACE = "^%s+"
+local PATTERN_SERVER_SUFFIX = "%-.*$"
+
 local professionLabels = {
     enchanting = "Enchanting",
     tailoring = "Tailoring",
@@ -172,12 +180,12 @@ end
 
 local function CleanName(name)
     if not name then return nil end
-    name = string.gsub(name, "|c%x%x%x%x%x%x%x%x", "")
-    name = string.gsub(name, "|r", "")
-    name = string.gsub(name, "%s*%b()", "")
-    name = string.gsub(name, "%s+$", "")
-    name = string.gsub(name, "^%s+", "")
-    name = string.gsub(name, "%-.*$", "")
+    name = string.gsub(name, PATTERN_COLOR_CODE, "")
+    name = string.gsub(name, PATTERN_COLOR_RESET, "")
+    name = string.gsub(name, PATTERN_PARENS, "")
+    name = string.gsub(name, PATTERN_TRAILING_SPACE, "")
+    name = string.gsub(name, PATTERN_LEADING_SPACE, "")
+    name = string.gsub(name, PATTERN_SERVER_SUFFIX, "")
     if name == "" then return nil end
     return name
 end

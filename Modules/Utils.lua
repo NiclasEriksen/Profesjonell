@@ -28,9 +28,7 @@ function Profesjonell.StripPrefix(s)
     return s
 end
 
-function Profesjonell.IsModern(version)
-    return version and Profesjonell.CompareVersions(version, "0.34") >= 0
-end
+-- Removed: IsModern() - all clients are now assumed to be >= 0.34
 
 function Profesjonell.GetItemNameFromLink(link)
     if not link then return nil end

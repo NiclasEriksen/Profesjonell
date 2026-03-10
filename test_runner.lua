@@ -86,10 +86,30 @@ function CreateFrame(type, name, parent, template)
     return frame
 end
 
+-- Parse version from .toc file
+local function LoadVersionFromToc()
+    local f = io.open("Profesjonell.toc", "r")
+    if not f then return "0" end
+    for line in f:lines() do
+        local version = string.match(line, "^## Version:%s*(.+)$")
+        if version then
+            f:close()
+            return version
+        end
+    end
+    f:close()
+    return "0"
+end
+
+local TOC_VERSION = LoadVersionFromToc()
+
 function GetTime() return 1000 end
 function UnitName(unit) return "Player" end
 function GetGuildInfo(unit) return "TestGuild" end
-function GetAddOnMetadata(addon, field) return "0.391" end
+function GetAddOnMetadata(addon, field)
+    if field == "Version" then return TOC_VERSION end
+    return nil
+end
 function GetItemInfo(id)
     if id == "1234" or id == 1234 then return "Lionheart Helm", "item:1234:0:0:0", 1, nil, nil, "Armor" end
     if id == "1000" or id == 1000 then return "Recipe: Transmute X", "item:1000:0:0:0", 1, nil, nil, "Recipe" end
@@ -369,16 +389,61 @@ Profesjonell.Frame.syncTimer = old_syncTimer
 -- Test BroadcastCharacterHashes with empty DB
 local old_db = ProfesjonellDB
 ProfesjonellDB = {}
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" } -- Ensure roster is set
+Profesjonell.CachedCharacterHashes = nil -- Clear cache
+Profesjonell.CachedDatabaseHash = nil -- Clear cache
 local SENT_MESSAGES = {}
 local old_SendAddonMessage = SendAddonMessage
-SendAddonMessage = function(prefix, msg, type) table.insert(SENT_MESSAGES, msg) end
+SendAddonMessage = function(prefix, msg, type)
+    table.insert(SENT_MESSAGES, msg)
+end
 Profesjonell.BroadcastCharacterHashes()
 local foundC = false
-for _, m in ipairs(SENT_MESSAGES) do if m == "C:" then foundC = true end end
+for _, m in ipairs(SENT_MESSAGES) do
+    if m == "C:" then foundC = true end
+end
 assert_equal(foundC, true, "BroadcastCharacterHashes sends 'C:' even if DB is empty")
 SendAddonMessage = old_SendAddonMessage
 ProfesjonellDB = old_db
 Profesjonell.UpdateGuildRosterCache = old_UpdateGuildRosterCache
+
+-- Test: syncRetryCount not reset when same peer sends same hash again
+Profesjonell.Frame.lastSyncPeer = "TestPeer"
+Profesjonell.Frame.lastRemoteHash = "abc123"
+Profesjonell.Frame.syncRetryCount = 2
+Profesjonell.Frame.syncTimer = nil
+Profesjonell.Frame.syncPendingChars = nil
+Profesjonell.Frame.pendingQ = nil
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+Profesjonell.RemoteVersions["TestPeer"] = "0.401"
+-- Simulate receiving H: with the same hash from the same peer
+Profesjonell.OnAddonMessage("H:abc123:0.401", "TestPeer")
+assert_equal(Profesjonell.Frame.syncRetryCount == 2, true, "syncRetryCount preserved when same peer sends same hash")
+
+-- Test: C: handler pushes data for characters remote doesn't know about
+Profesjonell.Frame.pendingB = {}
+Profesjonell.Frame.pendingR = {}
+Profesjonell.Frame.lastSyncPeer = "TestPeer"
+Profesjonell.Frame.lastRemoteHash = "xyz"
+Profesjonell.Frame.syncTimer = GetTime() + 100
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true }, ["i:2"] = { ["Other"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.UpdateGuildRosterCache = function()
+    Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+    return true
+end
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+-- Remote only mentions Player, not Other
+Profesjonell.OnAddonMessage("C:Player:somehash", "TestPeer")
+assert_equal(Profesjonell.Frame.pendingB["Other"] ~= nil, true, "C: handler pushes data for characters remote doesn't mention")
+
+Profesjonell.Frame.lastSyncPeer = nil
+Profesjonell.Frame.syncTimer = nil
+Profesjonell.Frame.broadcastHashTime = nil
 
 -- Summary
 print(string.format("\nTests complete: %d passed, %d failed", passed, failed))

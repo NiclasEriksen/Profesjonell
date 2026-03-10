@@ -15,25 +15,31 @@ Profesjonell.LastRosterRequest = 0
 function Profesjonell.UpdateGuildRosterCache()
     local now = GetTime()
     local guildName = Profesjonell.GetGuildName()
-    
+
     if not guildName then
         Profesjonell.GuildRosterCache = {}
         Profesjonell.LastRosterUpdate = 0
         return false
     end
 
-    -- Throttle actual server requests
+    -- If we have data and it's fresh (within 5s), return immediately without any additional work
+    if now - Profesjonell.LastRosterUpdate < 5 and next(Profesjonell.GuildRosterCache) then
+        return true
+    end
+
+    -- Throttle actual server requests (only request every 60s)
     if now - Profesjonell.LastRosterRequest > 60 then
         Profesjonell.Debug("Requesting GuildRoster from server")
         GuildRoster()
         Profesjonell.LastRosterRequest = now
     end
-    
-    -- If we have data and it's fresh (within 30s), just return true
+
+    -- If we have data and it's somewhat fresh (within 30s), just return true without re-parsing
     if now - Profesjonell.LastRosterUpdate < 30 and next(Profesjonell.GuildRosterCache) then
         return true
     end
 
+    -- Cache is stale, rebuild it
     local showOffline = GetGuildRosterShowOffline()
     if not showOffline then
         SetGuildRosterShowOffline(1)

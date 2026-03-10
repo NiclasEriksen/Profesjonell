@@ -12,33 +12,62 @@ Profesjonell.LastSyncRequest = 0
 Profesjonell.VersionWarned = false
 Profesjonell.RemoteVersions = {}
 
+-- Cache the string iteration function once at load time (WoW 1.12 uses gfind, later versions gmatch)
+local gfindFunc = string.gfind or string.gmatch
+
+-- Pre-compiled pattern for valid recipe ID validation (e.g. "i:1234", "s:5678")
+local VALID_ID_PATTERN = "^%a+:%d+$"
+
+-- Centralized pending action management
+Profesjonell.Frame = Profesjonell.Frame or {}
+Profesjonell.PendingActions = Profesjonell.PendingActions or {
+    R = {}, -- Recipe requests per character
+    B = {}, -- Batch sends per character
+    Q = nil, -- Query character hashes
+    C = nil, -- Character hash response
+    P = {}, -- ?prof coordination per query key
+    share = nil, -- Share all recipes delay
+    broadcastHash = nil, -- Hash broadcast delay
+    syncTimer = nil -- Sync retry timer
+}
+
+-- Legacy accessors for compatibility (will be removed gradually)
+Profesjonell.Frame.pendingR = Profesjonell.PendingActions.R
+Profesjonell.Frame.pendingB = Profesjonell.PendingActions.B
+
 function Profesjonell.ShareRecipes(charName, recipeList)
     if not Profesjonell.GetGuildName() or not Profesjonell.IsInGuild(charName) then return end
-    
+
     local prefix = "B:" .. charName .. ":"
-    local currentMsg = prefix
+    local prefixLen = string.len(prefix)
+    local parts = {}
     local batches = {}
     local batchCount = 0
+    local currentLen = prefixLen
 
     for _, recipeKey in ipairs(recipeList) do
-        -- Check if adding this recipe would exceed the 255 char limit
-        if string.len(currentMsg) + string.len(recipeKey) + 1 > 250 then
-            table.insert(batches, {msg = currentMsg, count = batchCount})
-            currentMsg = prefix .. recipeKey
+        local keyLen = string.len(recipeKey)
+        local separator = (batchCount > 0) and "," or ""
+        local separatorLen = string.len(separator)
+
+        -- Check if adding this recipe would exceed the 250 char limit
+        if currentLen + separatorLen + keyLen > 250 then
+            -- Finalize current batch
+            table.insert(batches, {msg = prefix .. table.concat(parts, ","), count = batchCount})
+            -- Start new batch
+            parts = {recipeKey}
             batchCount = 1
+            currentLen = prefixLen + keyLen
         else
-            if currentMsg == prefix then
-                currentMsg = currentMsg .. recipeKey
-                batchCount = 1
-            else
-                currentMsg = currentMsg .. "," .. recipeKey
-                batchCount = batchCount + 1
-            end
+            table.insert(parts, recipeKey)
+            batchCount = batchCount + 1
+            currentLen = currentLen + separatorLen + keyLen
         end
     end
 
-    if currentMsg ~= prefix then
-        table.insert(batches, {msg = currentMsg, count = batchCount})
+    -- Finalize last batch
+    if batchCount > 0 then
+        table.insert(batches, {msg = prefix .. table.concat(parts, ","), count = batchCount})
     end
 
     local totalBatches = table.getn(batches)
@@ -109,7 +138,7 @@ function Profesjonell.ShareAllRecipes(isManual, baseDelay, rangeDelay)
 
     sharingInProgress = true
     local index = 1
-    local chunkTimer = CreateFrame("Frame")
+    local chunkTimer = Profesjonell.TimerFrames[1]
     chunkTimer:SetScript("OnUpdate", function()
         if index <= table.getn(charsToShare) then
             local item = charsToShare[index]
@@ -117,7 +146,6 @@ function Profesjonell.ShareAllRecipes(isManual, baseDelay, rangeDelay)
             index = index + 1
         else
             chunkTimer:SetScript("OnUpdate", nil)
-            chunkTimer:Hide()
             sharingInProgress = false
             Profesjonell.Debug("Finished sharing all recipes.")
         end
@@ -131,39 +159,86 @@ function Profesjonell.BroadcastCharacterHashes()
         return
     end
 
-    local currentMsg = "C:"
+    local parts = {}
+    local currentLen = 2 -- "C:"
+    local batches = {}
+
     for charName, hash in pairs(charHashes) do
         local entry = charName .. ":" .. hash
-        if string.len(currentMsg) + string.len(entry) + 1 > 250 then
-            Profesjonell.Debug("Sending char hashes: " .. currentMsg)
-            SendAddonMessage(Profesjonell.Name, currentMsg, "GUILD")
-            currentMsg = "C:" .. entry
+        local entryLen = string.len(entry)
+        local separator = (table.getn(parts) > 0) and "," or ""
+        local separatorLen = string.len(separator)
+
+        if currentLen + separatorLen + entryLen > 250 then
+            -- Finalize current batch
+            local msg = "C:" .. table.concat(parts, ",")
+            Profesjonell.Debug("Sending char hashes: " .. msg)
+            SendAddonMessage(Profesjonell.Name, msg, "GUILD")
+            -- Start new batch
+            parts = {entry}
+            currentLen = 2 + entryLen
         else
-            if currentMsg == "C:" then
-                currentMsg = currentMsg .. entry
-            else
-                currentMsg = currentMsg .. "," .. entry
-            end
+            table.insert(parts, entry)
+            currentLen = currentLen + separatorLen + entryLen
         end
     end
-    
-    if currentMsg ~= "C:" or not next(charHashes) then
-        Profesjonell.Debug("Sending char hashes: " .. currentMsg)
-        SendAddonMessage(Profesjonell.Name, currentMsg, "GUILD")
-    end
+
+    -- Finalize last batch (or send empty C: if no hashes)
+    local msg = "C:" .. table.concat(parts, ",")
+    Profesjonell.Debug("Sending char hashes: " .. msg)
+    SendAddonMessage(Profesjonell.Name, msg, "GUILD")
 end
 
 function Profesjonell.OnCommUpdate()
     local now = GetTime()
     local frame = Profesjonell.Frame
-    if not frame then return end
+    local pending = Profesjonell.PendingActions
+    if not frame or not pending then return end
 
-    if frame.broadcastHashTime and now >= frame.broadcastHashTime then
+    -- Process broadcast hash
+    if pending.broadcastHash and now >= pending.broadcastHash then
+        Profesjonell.BroadcastHash()
+        pending.broadcastHash = nil
+        frame.broadcastHashTime = nil -- Legacy cleanup
+    elseif frame.broadcastHashTime and now >= frame.broadcastHashTime then
         Profesjonell.BroadcastHash()
         frame.broadcastHashTime = nil
     end
 
-    if frame.syncTimer and now >= frame.syncTimer then
+    -- Process sync timer
+    if pending.syncTimer and now >= pending.syncTimer then
+        if frame.lastRemoteHash and frame.lastSyncPeer then
+            local currentHash = Profesjonell.GenerateDatabaseHash()
+            if currentHash ~= frame.lastRemoteHash then
+                if frame.syncRetryCount and frame.syncRetryCount >= 3 then
+                    Profesjonell.Debug("Sync retries exhausted for " .. frame.lastSyncPeer .. ". Stopping sync to avoid loops.")
+                    pending.syncTimer = nil
+                    frame.syncTimer = nil
+                    frame.lastRemoteHash = nil
+                    frame.lastSyncPeer = nil
+                    frame.syncPendingChars = nil
+                    frame.syncRetryCount = nil
+                    return
+                end
+
+                frame.syncRetryCount = (frame.syncRetryCount or 0) + 1
+                Profesjonell.Debug("Sync timer expired, hashes still mismatch (attempt " .. frame.syncRetryCount .. "/3). Requesting character hashes from " .. frame.lastSyncPeer)
+
+                pending.Q = GetTime() + Profesjonell.GetSyncDelay(0.5, 1.5)
+                pending.syncTimer = GetTime() + 15 + math.random() * 5
+                frame.syncTimer = pending.syncTimer
+                return
+            end
+            frame.syncRetryCount = nil
+        end
+        Profesjonell.RequestSync()
+        pending.syncTimer = nil
+        frame.syncTimer = nil
+        frame.lastRemoteHash = nil
+        frame.lastSyncPeer = nil
+        frame.syncPendingChars = nil
+    elseif frame.syncTimer and now >= frame.syncTimer then
+        -- Legacy path
         if frame.lastRemoteHash and frame.lastSyncPeer then
             local currentHash = Profesjonell.GenerateDatabaseHash()
             if currentHash ~= frame.lastRemoteHash then
@@ -176,16 +251,10 @@ function Profesjonell.OnCommUpdate()
                     frame.syncRetryCount = nil
                     return
                 end
-
                 frame.syncRetryCount = (frame.syncRetryCount or 0) + 1
-                Profesjonell.Debug("Sync timer expired, hashes still mismatch (attempt " .. frame.syncRetryCount .. "/3). Requesting character hashes from " .. frame.lastSyncPeer)
-                
-                -- Queue Q instead of sending immediately
-                frame.pendingQ = GetTime() + Profesjonell.GetSyncDelay(0.5, 1.5)
-                
-                -- Extend the timer to allow the Q response to arrive
+                pending.Q = GetTime() + Profesjonell.GetSyncDelay(0.5, 1.5)
                 frame.syncTimer = GetTime() + 15 + math.random() * 5
-                return 
+                return
             end
             frame.syncRetryCount = nil
         end
@@ -196,83 +265,89 @@ function Profesjonell.OnCommUpdate()
         frame.syncPendingChars = nil
     end
 
-    if frame.pendingShare and now >= frame.pendingShare then
+    -- Process share
+    if pending.share and now >= pending.share then
+        Profesjonell.ShareAllRecipes(true)
+        pending.share = nil
+        frame.pendingShare = nil
+    elseif frame.pendingShare and now >= frame.pendingShare then
         Profesjonell.ShareAllRecipes(true)
         frame.pendingShare = nil
     end
 
-    -- New pending actions
-    if frame.pendingQ and now >= frame.pendingQ then
+    -- Process Q
+    if pending.Q and now >= pending.Q then
+        Profesjonell.Debug("Sending delayed Q request")
+        SendAddonMessage(Profesjonell.Name, "Q", "GUILD")
+        pending.Q = nil
+        frame.pendingQ = nil
+    elseif frame.pendingQ and now >= frame.pendingQ then
         Profesjonell.Debug("Sending delayed Q request")
         SendAddonMessage(Profesjonell.Name, "Q", "GUILD")
         frame.pendingQ = nil
     end
 
-    if frame.pendingC and now >= frame.pendingC then
+    -- Process C
+    if pending.C and now >= pending.C then
+        Profesjonell.Debug("Sending delayed C response (char hashes)")
+        Profesjonell.BroadcastCharacterHashes()
+        pending.C = nil
+        frame.pendingC = nil
+    elseif frame.pendingC and now >= frame.pendingC then
         Profesjonell.Debug("Sending delayed C response (char hashes)")
         Profesjonell.BroadcastCharacterHashes()
         frame.pendingC = nil
     end
 
-    if not frame.pendingR then frame.pendingR = {} end
-    if frame.pendingR then
-        for charName, time in pairs(frame.pendingR) do
-            if now >= time then
-                Profesjonell.Debug("Sending delayed R request for " .. charName)
-                SendAddonMessage(Profesjonell.Name, "R:" .. charName, "GUILD")
-                frame.pendingR[charName] = nil
-            end
+    -- Process R requests
+    for charName, time in pairs(pending.R) do
+        if now >= time then
+            Profesjonell.Debug("Sending delayed R request for " .. charName)
+            SendAddonMessage(Profesjonell.Name, "R:" .. charName, "GUILD")
+            pending.R[charName] = nil
         end
     end
 
-    if not frame.pendingB then frame.pendingB = {} end
-    if frame.pendingB then
-        for charName, time in pairs(frame.pendingB) do
-            if now >= time then
-                Profesjonell.Debug("Sending delayed B response for " .. charName)
-                local recipes = {}
-                if ProfesjonellDB then
-                    for key, holders in pairs(ProfesjonellDB) do
-                        if holders[charName] then
-                            table.insert(recipes, key)
-                        end
+    -- Process B sends
+    for charName, time in pairs(pending.B) do
+        if now >= time then
+            Profesjonell.Debug("Sending delayed B response for " .. charName)
+            local recipes = {}
+            if ProfesjonellDB then
+                for key, holders in pairs(ProfesjonellDB) do
+                    if holders[charName] then
+                        table.insert(recipes, key)
                     end
                 end
-                if table.getn(recipes) > 0 then
-                    Profesjonell.ShareRecipes(charName, recipes)
-                end
-                frame.pendingB[charName] = nil
             end
+            local recipeCount = table.getn(recipes)
+            if recipeCount > 0 then
+                Profesjonell.ShareRecipes(charName, recipes)
+            end
+            pending.B[charName] = nil
         end
     end
 end
 
 function Profesjonell.OnAddonMessage(message, sender)
     if sender == Profesjonell.GetPlayerName() then return end
-    
-    local remoteVersion = Profesjonell.RemoteVersions[sender]
-    local isModern = Profesjonell.IsModern(remoteVersion)
 
-    if string.find(message, "^B:") then
+    local remoteVersion = Profesjonell.RemoteVersions[sender]
+
+    if string.sub(message, 1, 2) == "B:" then
         local _, _, charName, idList = string.find(message, "^B:([^:]+):(.+)$")
         if charName and idList then
-            local count = 0
-            local gfindFunc = string.gfind or string.gmatch
-            for _ in gfindFunc(idList, "([^,]+)") do
-                count = count + 1
-            end
-            Profesjonell.Debug("Received recipe batch from " .. sender .. " for " .. charName .. " (" .. count .. " recipes)")
-            
+            Profesjonell.Debug("Received recipe batch from " .. sender .. " for " .. charName)
+
             if Profesjonell.IsInGuild(charName) then
-                if isModern then
-                    if Profesjonell.Frame.pendingR and Profesjonell.Frame.pendingR[charName] then
-                        Profesjonell.Debug("Received B for " .. charName .. ". Cancelling pending R request.")
-                        Profesjonell.Frame.pendingR[charName] = nil
-                    end
-                    if Profesjonell.Frame.pendingB and Profesjonell.Frame.pendingB[charName] then
-                        Profesjonell.Debug("Received B for " .. charName .. ". Cancelling pending B response.")
-                        Profesjonell.Frame.pendingB[charName] = nil
-                    end
+                -- Cancel pending actions (modern protocol)
+                if Profesjonell.Frame.pendingR[charName] then
+                    Profesjonell.Debug("Received B for " .. charName .. ". Cancelling pending R request.")
+                    Profesjonell.Frame.pendingR[charName] = nil
+                end
+                if Profesjonell.Frame.pendingB[charName] then
+                    Profesjonell.Debug("Received B for " .. charName .. ". Cancelling pending B response.")
+                    Profesjonell.Frame.pendingB[charName] = nil
                 end
 
                 local addedAny = false
@@ -281,7 +356,7 @@ function Profesjonell.OnAddonMessage(message, sender)
                     id = Profesjonell.GetIDFromLink(id)
                     
                     -- Only proceed if it looks like a valid ID
-                    if id and string.find(id, "^%a+:%d+$") then
+                    if id and string.find(id, VALID_ID_PATTERN) then
                         if not ProfesjonellDB[id] then ProfesjonellDB[id] = {} end
                         if not ProfesjonellDB[id][charName] then
                             -- Cleanup legacy name-based entry if it exists for this character
@@ -348,7 +423,7 @@ function Profesjonell.OnAddonMessage(message, sender)
                         end
                     end
 
-                    if Profesjonell.Frame.pendingShare and isModern then
+                    if Profesjonell.Frame.pendingShare then
                         Profesjonell.Debug("Received B from " .. sender .. ". Cancelling pending sync response.")
                         Profesjonell.Frame.pendingShare = nil
                     end
@@ -361,26 +436,20 @@ function Profesjonell.OnAddonMessage(message, sender)
         else
             Profesjonell.Debug("Received addon message from " .. sender .. ": " .. message)
         end
-    elseif message == "S" or message == "REQ_SYNC" then
-        local senderVersion = Profesjonell.RemoteVersions[sender]
-        if senderVersion and Profesjonell.CompareVersions(senderVersion, Profesjonell.Version) < 0 then
-             Profesjonell.Debug("Dampening S request from older version " .. senderVersion .. " (" .. sender .. ")")
-             Profesjonell.ShareAllRecipes(false, 5.0, 5.0) -- Wait 5-10 seconds
-        else
-             Profesjonell.ShareAllRecipes()
-        end
+    elseif message == "S" then
+        Profesjonell.ShareAllRecipes()
     elseif message == "Q" then
-        if Profesjonell.Frame.pendingQ and isModern then
+        if Profesjonell.Frame.pendingQ then
             Profesjonell.Debug("Received Q from " .. sender .. ". Cancelling our own Q request.")
             Profesjonell.Frame.pendingQ = nil
         end
         local delay = Profesjonell.GetSyncDelay(0.5, 1.5)
         Profesjonell.Frame.pendingC = GetTime() + delay
         Profesjonell.Debug("Received Q from " .. sender .. ". Scheduling C response in " .. string.format("%.2f", delay) .. "s")
-    elseif string.find(message, "^C:") then
-        local _, _, data = string.find(message, "^C:(.*)$")
-        if data then
-            if Profesjonell.Frame.pendingC and isModern then
+    elseif string.sub(message, 1, 2) == "C:" then
+        local data = string.sub(message, 3)
+        do
+            if Profesjonell.Frame.pendingC then
                 Profesjonell.Debug("Received C from " .. sender .. ". Cancelling our own C response.")
                 Profesjonell.Frame.pendingC = nil
             end
@@ -388,10 +457,11 @@ function Profesjonell.OnAddonMessage(message, sender)
             if myHashes then
                 local mismatchCount = 0
                 local myOwnHashMismatch = false
-                local gfindFunc = string.gfind or string.gmatch
+                local remoteChars = {}
                 for charEntry in gfindFunc(data, "([^,]+)") do
                     local _, _, charName, remoteHash = string.find(charEntry, "([^:]+):([^:]+)")
                     if charName and remoteHash then
+                        remoteChars[charName] = true
                         if charName == Profesjonell.GetPlayerName() then
                             if myHashes[charName] ~= remoteHash then
                                 myOwnHashMismatch = true
@@ -399,27 +469,44 @@ function Profesjonell.OnAddonMessage(message, sender)
                         elseif myHashes[charName] ~= remoteHash then
                             Profesjonell.Debug("Hash mismatch for " .. charName .. ". Scheduling R request.")
                             local delay = Profesjonell.GetSyncDelay(0.5, 1.5)
-                            if not Profesjonell.Frame.pendingR then Profesjonell.Frame.pendingR = {} end
                             Profesjonell.Frame.pendingR[charName] = GetTime() + delay
                             mismatchCount = mismatchCount + 1
                         end
                     end
                 end
 
-                if mismatchCount > 0 then
+                -- Check for characters we have locally that the remote didn't mention.
+                -- These are characters the remote doesn't know about, so we push our data.
+                local pushCount = 0
+                local playerName = Profesjonell.GetPlayerName()
+                for charName, _ in pairs(myHashes) do
+                    if not remoteChars[charName] and charName ~= playerName then
+                        Profesjonell.Debug("Remote missing character " .. charName .. ". Scheduling B push.")
+                        local delay = Profesjonell.GetSyncDelay(0.5, 1.5)
+                        Profesjonell.Frame.pendingB[charName] = GetTime() + delay
+                        pushCount = pushCount + 1
+                    end
+                end
+
+                if mismatchCount > 0 or pushCount > 0 then
                     if Profesjonell.Frame.syncTimer then
                         -- Extend sync timer to allow character-specific syncs to complete
-                        local extension = math.min(mismatchCount * 5, 30)
+                        local totalActions = mismatchCount + pushCount
+                        local extension = math.min(totalActions * 5, 30)
                         Profesjonell.Frame.syncTimer = GetTime() + 10 + extension + math.random() * 5
-                        Profesjonell.Debug("Mismatches found: " .. mismatchCount .. ". Extending sync timer by " .. extension .. "s.")
+                        Profesjonell.Debug("Mismatches: " .. mismatchCount .. ", pushes: " .. pushCount .. ". Extending sync timer by " .. extension .. "s.")
                     end
                     -- Track how many characters we are waiting for from this peer
                     Profesjonell.Frame.syncPendingChars = mismatchCount
+                    -- Also push our own recipes if the remote has a stale hash for us
+                    if myOwnHashMismatch then
+                        local delay = Profesjonell.GetSyncDelay(0.5, 1.5, true)
+                        Profesjonell.Frame.pendingB[playerName] = GetTime() + delay
+                    end
                 elseif myOwnHashMismatch then
                     Profesjonell.Debug("Remote has an old hash for us. Scheduling push of our recipes.")
                     local playerName = Profesjonell.GetPlayerName()
                     local delay = Profesjonell.GetSyncDelay(0.5, 1.5, true)
-                    if not Profesjonell.Frame.pendingB then Profesjonell.Frame.pendingB = {} end
                     Profesjonell.Frame.pendingB[playerName] = GetTime() + delay
                     
                     -- We pushed our data, now we just wait for the peer to update and broadcast H
@@ -451,16 +538,15 @@ function Profesjonell.OnAddonMessage(message, sender)
                 Profesjonell.Debug("Roster not ready for character hash comparison, skipping.")
             end
         end
-    elseif string.find(message, "^R:") then
+    elseif string.sub(message, 1, 2) == "R:" then
         local charName = string.sub(message, 3)
-        if charName then
-            if Profesjonell.Frame.pendingR and Profesjonell.Frame.pendingR[charName] and isModern then
+        if charName and charName ~= "" then
+            if Profesjonell.Frame.pendingR[charName] then
                 Profesjonell.Debug("Received R for " .. charName .. " from " .. sender .. ". Cancelling our own R request.")
                 Profesjonell.Frame.pendingR[charName] = nil
             end
             local isMyChar = (charName == Profesjonell.GetPlayerName())
             local delay = Profesjonell.GetSyncDelay(0.5, 1.5, isMyChar)
-            if not Profesjonell.Frame.pendingB then Profesjonell.Frame.pendingB = {} end
             Profesjonell.Frame.pendingB[charName] = GetTime() + delay
             Profesjonell.Debug("Received R for " .. charName .. " from " .. sender .. ". Scheduling B response in " .. string.format("%.2f", delay) .. "s")
             
@@ -476,22 +562,15 @@ function Profesjonell.OnAddonMessage(message, sender)
                 end
             end
         end
-    elseif string.find(message, "^H:") or string.find(message, "^HASH:") then
-        local remoteHash, remoteVersion
-        local _, _, h, v = string.find(message, "^H:([^:]+):(.+)$")
-        if not h then
-            _, _, h, v = string.find(message, "^HASH:([^:]+):(.+)$")
+    elseif string.sub(message, 1, 2) == "H:" then
+        local _, _, remoteHash, remoteVersion = string.find(message, "^H:([^:]+):(.+)$")
+
+        if not remoteHash or not remoteVersion then
+            Profesjonell.Debug("Received malformed H: message from " .. sender)
+            return
         end
-        
-        if h then
-            remoteHash, remoteVersion = h, v
-            Profesjonell.RemoteVersions[sender] = remoteVersion
-        else
-            -- Fallback for very old versions: HASH:hash or H:hash
-            local colonPos = string.find(message, ":")
-            remoteHash = colonPos and string.sub(message, colonPos + 1) or ""
-            remoteVersion = "0"
-        end
+
+        Profesjonell.RemoteVersions[sender] = remoteVersion
 
         local localHash = Profesjonell.GenerateDatabaseHash()
         if localHash and localHash == remoteHash then
@@ -511,32 +590,36 @@ function Profesjonell.OnAddonMessage(message, sender)
             end
         end
 
+        -- Warn about version mismatches
         if not Profesjonell.VersionWarned then
-            if Profesjonell.CompareVersions(remoteVersion, Profesjonell.Version) > 0 then
+            local versionDiff = Profesjonell.CompareVersions(remoteVersion, Profesjonell.Version)
+            if versionDiff > 0 then
                 Profesjonell.Print("|cffff0000Warning:|r A newer version of Profesjonell (v" .. remoteVersion .. ") is available! Please update.")
                 Profesjonell.VersionWarned = true
-            elseif Profesjonell.CompareVersions(remoteVersion, Profesjonell.Version) < 0 and remoteVersion ~= "0" then
-                Profesjonell.Frame.broadcastHashTime = GetTime() + 1
+            elseif versionDiff < 0 and Profesjonell.CompareVersions(remoteVersion, "0.34") < 0 then
+                Profesjonell.Print("|cffff0000Incompatible:|r " .. sender .. " is using v" .. remoteVersion .. " (requires v0.34+). Sync disabled.")
                 Profesjonell.VersionWarned = true
             end
         end
-        
+
         if localHash then
             if localHash ~= remoteHash then
-                local versionDiff = Profesjonell.CompareVersions(remoteVersion, Profesjonell.Version)
-                
-                if versionDiff < 0 then
-                    Profesjonell.Debug("Hash mismatch with older version " .. remoteVersion .. " from " .. sender .. ". Skipping sync to avoid loops.")
+                -- Skip sync with incompatible old versions
+                if Profesjonell.CompareVersions(remoteVersion, "0.34") < 0 then
+                    Profesjonell.Debug("Ignoring hash mismatch with incompatible version " .. remoteVersion .. " from " .. sender)
                     return
                 end
 
                 Profesjonell.Debug("Hash mismatch with " .. sender .. "! Scheduling Q request.")
                 Profesjonell.Frame.pendingQ = GetTime() + Profesjonell.GetSyncDelay(0.5, 1.5)
                 
+                Profesjonell.Frame.syncPendingChars = nil -- Reset any stale count
+                -- Only reset retry count if the peer or hash actually changed
+                if Profesjonell.Frame.lastSyncPeer ~= sender or Profesjonell.Frame.lastRemoteHash ~= remoteHash then
+                    Profesjonell.Frame.syncRetryCount = 0
+                end
                 Profesjonell.Frame.lastRemoteHash = remoteHash
                 Profesjonell.Frame.lastSyncPeer = sender
-                Profesjonell.Frame.syncPendingChars = nil -- Reset any stale count
-                Profesjonell.Frame.syncRetryCount = 0 -- Reset retry count for new peer/hash
                 local delay = 20 + math.random() * 10
                 if not Profesjonell.Frame.syncTimer or GetTime() > Profesjonell.Frame.syncTimer then
                     Profesjonell.Frame.syncTimer = GetTime() + delay
@@ -551,7 +634,7 @@ function Profesjonell.OnAddonMessage(message, sender)
                 end
             end
         end
-    elseif string.find(message, "^REMOVE_CHAR:") then
+    elseif string.sub(message, 1, 12) == "REMOVE_CHAR:" then
         -- We'll keep REMOVE support for now, but it's officer only
         local charToRemove = string.sub(message, 13)
         if Profesjonell.IsOfficer(sender) then
@@ -573,7 +656,7 @@ function Profesjonell.OnAddonMessage(message, sender)
                 end
             end
         end
-    elseif string.find(message, "^REMOVE_RECIPE:") then
+    elseif string.sub(message, 1, 14) == "REMOVE_RECIPE:" then
         local _, _, charName, recipeKey = string.find(message, "^REMOVE_RECIPE:([^:]+):(.+)$")
         if Profesjonell.IsOfficer(sender) then
             -- Normalize recipeKey for backward compatibility
@@ -591,14 +674,9 @@ function Profesjonell.OnAddonMessage(message, sender)
                 end
             end
         end
-    elseif string.find(message, "^P:") then
+    elseif string.sub(message, 1, 2) == "P:" then
         local queryKey = string.sub(message, 3)
         if queryKey then
-            -- Anyone sending P is definitely modern
-            if not Profesjonell.RemoteVersions[sender] then
-                Profesjonell.RemoteVersions[sender] = "0.37"
-            end
-            
             local amIPending = Profesjonell.Frame.pendingP and Profesjonell.Frame.pendingP[queryKey]
             if Profesjonell.PendingReplies[queryKey] then
                 if amIPending or sender < Profesjonell.GetPlayerName() then
