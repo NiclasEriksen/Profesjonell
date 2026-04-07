@@ -27,9 +27,16 @@ function Profesjonell.UpdateGuildRosterCache()
         return true
     end
 
+    -- Ensure ShowOffline is enabled BEFORE any roster operations
+    -- This ensures we always see the full guild roster including offline members
+    local showOffline = GetGuildRosterShowOffline()
+    if showOffline ~= 1 then
+        SetGuildRosterShowOffline(1)
+    end
+
     -- Throttle actual server requests (only request every 60s)
     if now - Profesjonell.LastRosterRequest > 60 then
-        Profesjonell.Debug("Requesting GuildRoster from server")
+        Profesjonell.Debug("Requesting GuildRoster from server (with offline members)")
         GuildRoster()
         Profesjonell.LastRosterRequest = now
     end
@@ -40,15 +47,11 @@ function Profesjonell.UpdateGuildRosterCache()
     end
 
     -- Cache is stale, rebuild it
-    local showOffline = GetGuildRosterShowOffline()
-    if not showOffline then
-        SetGuildRosterShowOffline(1)
-    end
 
     local num = GetNumGuildMembers()
     if num == 0 then
-        if not showOffline then
-            SetGuildRosterShowOffline(0)
+        if showOffline ~= 1 then
+            SetGuildRosterShowOffline(showOffline)
         end
         return false
     end
@@ -63,8 +66,8 @@ function Profesjonell.UpdateGuildRosterCache()
         end
     end
 
-    if not showOffline then
-        SetGuildRosterShowOffline(0)
+    if showOffline ~= 1 then
+        SetGuildRosterShowOffline(showOffline)
     end
 
     Profesjonell.LastRosterUpdate = now

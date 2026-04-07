@@ -45,16 +45,6 @@ function Profesjonell.OnUpdate()
         Profesjonell.SyncSummaryTimer = nil
     end
 
-    if frame.pendingP then
-        for queryKey, time in pairs(frame.pendingP) do
-            if now >= time then
-                Profesjonell.Debug("Sending P coordination for '" .. queryKey .. "'")
-                SendAddonMessage(Profesjonell.Name, "P:" .. queryKey, "GUILD")
-                frame.pendingP[queryKey] = nil
-            end
-        end
-    end
-
     for queryKey, data in pairs(Profesjonell.PendingReplies) do
         if now >= data.time then
             local found, cleanName, partialMatches, exactMatchLink, partialLinks = Profesjonell.FindRecipeHolders(data.originalQuery)
@@ -68,26 +58,61 @@ function Profesjonell.OnUpdate()
             end
 
             if matchCount > 1 then
-                replyMsg = "Profesjonell: Multiple matches found for '" .. data.cleanName .. "'. Please be more specific."
-            elseif matchCount == 1 then
-                if table.getn(found) > 0 then
-                    replyMsg = "Profesjonell: " .. (exactMatchLink or cleanName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(found), ", ")
+                -- We have results (multiple matches)
+                if not data.pSent then
+                    -- First: Send P: to claim this reply, then add small delay for P: to propagate
+                    Profesjonell.Debug("Sending P: coordination for multiple matches reply to '" .. queryKey .. "'")
+                    SendAddonMessage(Profesjonell.Name, "P:" .. queryKey, "GUILD")
+                    data.pSent = true
+                    data.time = now + 0.15 + math.random() * 0.1 -- 150-250ms delay for P: propagation
                 else
-                    local pName, pHolders, pLink
-                    for name, holders in pairs(partialMatches) do
-                        pName = name
-                        pHolders = holders
-                        pLink = partialLinks[name]
+                    -- Second: P: was sent, now send the actual reply
+                    replyMsg = "Profesjonell: Multiple matches found for '" .. data.cleanName .. "'. Please be more specific."
+                end
+            elseif matchCount == 1 then
+                -- We have results (single match)
+                if not data.pSent then
+                    -- First: Send P: to claim this reply, then add small delay for P: to propagate
+                    Profesjonell.Debug("Sending P: coordination for single match reply to '" .. queryKey .. "'")
+                    SendAddonMessage(Profesjonell.Name, "P:" .. queryKey, "GUILD")
+                    data.pSent = true
+                    data.time = now + 0.15 + math.random() * 0.1 -- 150-250ms delay for P: propagation
+                else
+                    -- Second: P: was sent, now send the actual reply
+                    if table.getn(found) > 0 then
+                        replyMsg = "Profesjonell: " .. (exactMatchLink or cleanName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(found), ", ")
+                    else
+                        local pName, pHolders, pLink
+                        for name, holders in pairs(partialMatches) do
+                            pName = name
+                            pHolders = holders
+                            pLink = partialLinks[name]
+                        end
+                        table.sort(pHolders)
+                        replyMsg = "Profesjonell: " .. (pLink or pName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(pHolders), ", ")
                     end
-                    table.sort(pHolders)
-                    replyMsg = "Profesjonell: " .. (pLink or pName) .. " is known by: " .. table.concat(Profesjonell.ColorizeList(pHolders), ", ")
                 end
             else
-                replyMsg = "Profesjonell: No one knows " .. data.cleanName
+                -- No results found
+                if not data.noResultsDelayed then
+                    -- First check: Add extra delay for "no one knows" responses to prioritize complete databases
+                    data.noResultsDelayed = true
+                    -- Reduced extra delay: 1.5-2.5s (enough to let complete databases respond first)
+                    data.time = now + 1.5 + math.random() * 1.0
+                    Profesjonell.Debug("No results found for '" .. queryKey .. "', adding 1.5-2.5s extra delay to prioritize complete databases")
+                else
+                    -- Second check after delay: Send P: just before replying "no one knows" to prevent duplicates
+                    Profesjonell.Debug("Sending P: coordination for 'no one knows' reply to '" .. queryKey .. "'")
+                    SendAddonMessage(Profesjonell.Name, "P:" .. queryKey, "GUILD")
+                    replyMsg = "Profesjonell: No one knows " .. data.cleanName
+                end
             end
-            SendChatMessage(replyMsg, "GUILD")
-            Profesjonell.Debug("Sent reply: " .. replyMsg)
-            Profesjonell.PendingReplies[queryKey] = nil
+
+            if replyMsg then
+                SendChatMessage(replyMsg, "GUILD")
+                Profesjonell.Debug("Sent reply: " .. replyMsg)
+                Profesjonell.PendingReplies[queryKey] = nil
+            end
         end
     end
 end
@@ -122,29 +147,24 @@ function Profesjonell.OnGuildChat(msg, sender)
             
             if not Profesjonell.PendingReplies[queryKey] then
                 local playerOffset = Profesjonell.GetPlayerOffset()
-                local delay = 1.0 + playerOffset + math.random() * 2.5
+                -- Reduced delay: 0.5-2.0s for faster responses
+                local delay = 0.5 + playerOffset + math.random() * 1.0
                 Profesjonell.PendingReplies[queryKey] = {
                     time = GetTime() + delay,
                     originalQuery = recipe,
                     cleanName = inputCleanName
                 }
-
-                -- Schedule a fast addon message to coordinate with other modern clients
-                if not Profesjonell.Frame.pendingP then Profesjonell.Frame.pendingP = {} end
-                if not Profesjonell.Frame.pendingP[queryKey] then
-                    local fastDelay = 0.1 + playerOffset + math.random() * 0.4
-                    Profesjonell.Frame.pendingP[queryKey] = GetTime() + fastDelay
-                end
+                -- Note: We do NOT send P: here. We'll send it only after checking the database
+                -- and determining if we have results (send P: immediately) or no results (send P: after delay)
             end
         end
     elseif string.find(msg, "^Profesjonell: ") then
+        -- Someone else replied - cancel our pending reply if it matches this query
         local lowerMsg = string.lower(msg)
         for queryKey, _ in pairs(Profesjonell.PendingReplies) do
             if string.find(lowerMsg, queryKey, 1, true) then
+                Profesjonell.Debug("Received reply from someone else for '" .. queryKey .. "'. Cancelling local reply.")
                 Profesjonell.PendingReplies[queryKey] = nil
-                if Profesjonell.Frame.pendingP and Profesjonell.Frame.pendingP[queryKey] then
-                    Profesjonell.Frame.pendingP[queryKey] = nil
-                end
             end
         end
     end

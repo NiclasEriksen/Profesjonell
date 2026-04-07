@@ -332,9 +332,9 @@ function Profesjonell.OnAddonMessage(message, sender)
                 -- we still need to send it for convergence.
 
                 local addedAny = false
-                for id in gfindFunc(idList, "([^,]+)") do
+                for rawId in gfindFunc(idList, "([^,]+)") do
                     -- Normalize ID and validate format
-                    id = Profesjonell.GetIDFromLink(id)
+                    local id = Profesjonell.GetIDFromLink(rawId)
 
                     -- Only proceed if it looks like a valid ID
                     if id and string.find(id, VALID_ID_PATTERN) then
@@ -676,18 +676,14 @@ function Profesjonell.OnAddonMessage(message, sender)
     elseif string.sub(message, 1, 2) == "P:" then
         local queryKey = string.sub(message, 3)
         if queryKey then
-            local amIPending = Profesjonell.Frame.pendingP and Profesjonell.Frame.pendingP[queryKey]
             if Profesjonell.PendingReplies[queryKey] then
-                if amIPending or sender < Profesjonell.GetPlayerName() then
-                    Profesjonell.Debug("Received P for '" .. queryKey .. "' from " .. sender .. ". Cancelling local reply.")
+                -- Someone else is claiming this reply. Use alphabetical name comparison for priority.
+                if sender < Profesjonell.GetPlayerName() then
+                    Profesjonell.Debug("Received P for '" .. queryKey .. "' from " .. sender .. " (higher priority). Cancelling local reply.")
                     Profesjonell.PendingReplies[queryKey] = nil
                 else
-                    Profesjonell.Debug("Received P for '" .. queryKey .. "' from " .. sender .. " but we have priority. Ignoring.")
+                    Profesjonell.Debug("Received P for '" .. queryKey .. "' from " .. sender .. " but we have priority (alphabetically). Keeping local reply.")
                 end
-            end
-
-            if amIPending then
-                Profesjonell.Frame.pendingP[queryKey] = nil
             end
         end
     end

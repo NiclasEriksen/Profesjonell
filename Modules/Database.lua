@@ -615,6 +615,10 @@ function Profesjonell.FindRecipeHolders(name)
         rosterReady = Profesjonell.UpdateGuildRosterCache()
     end
 
+    if not rosterReady then
+        Profesjonell.Debug("Warning: Guild roster not fully loaded during recipe lookup. Results may be incomplete.")
+    end
+
     -- If name looks like a link, try to resolve it to specific keys first
     local linkKeys = nil
     if string.find(name, "|H") then
@@ -630,6 +634,7 @@ function Profesjonell.FindRecipeHolders(name)
                 exactMatchName = Profesjonell.StripPrefix(rName)
                 exactMatchLink = link
                 for charName, _ in pairs(holders) do
+                    -- Include all holders when roster is not ready to avoid false "no one knows" responses
                     if not rosterReady or (Profesjonell.GuildRosterCache and Profesjonell.GuildRosterCache[charName]) then
                         foundSet[charName] = true
                     end
@@ -664,6 +669,7 @@ function Profesjonell.FindRecipeHolders(name)
                 if isExact or isPartial then
                     local link = Profesjonell.GetLinkFromKey(rKey)
                     for charName, _ in pairs(holders) do
+                        -- Include all holders when roster is not ready to avoid false "no one knows" responses
                         if not rosterReady or (Profesjonell.GuildRosterCache and Profesjonell.GuildRosterCache[charName]) then
                             if isExact then
                                 exactMatchName = cleanRName
