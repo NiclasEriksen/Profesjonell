@@ -81,6 +81,13 @@ end
 function Profesjonell.GetSyncDelay(base, range, priority)
     base = base or 0.5
     range = range or 2
+    -- Scale delays based on known addon user count to reduce thundering herd
+    local userCount = Profesjonell.KnownAddonUserCount or 1
+    local userScale = math.min(userCount, 30) / 10 -- 0.1 to 3.0
+    if userScale > 1 then
+        base = base * userScale
+        range = range * userScale
+    end
     if priority then
         base = base * 0.5
         range = range * 0.5

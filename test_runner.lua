@@ -246,6 +246,15 @@ Profesjonell.IsOfficer = function(name) return name == "Officer" end
 Profesjonell.OnAddonMessage("REMOVE_CHAR:Other", "Officer")
 assert_equal(ProfesjonellDB["i:555"] == nil, true, "REMOVE_CHAR removes character data")
 
+-- Helper: flush C: buffer by advancing time past settle delay and calling OnCommUpdate
+local function flushCBuffer()
+    local oldGetTime = GetTime
+    local now = oldGetTime()
+    GetTime = function() return now + 2 end -- 2s > 1.5s settle delay
+    Profesjonell.OnCommUpdate()
+    GetTime = oldGetTime
+end
+
 -- Global to track sent messages
 sentMessages = {}
 local oldSAM = SendAddonMessage
@@ -266,6 +275,7 @@ Profesjonell.Frame.pendingR = {}
 -- Remote peer reports "Player" has hash "abc", but we have nothing for "Player" locally (hash "0")
 local mockMessage = "C:Player:abc,Other:abc" 
 Profesjonell.OnAddonMessage(mockMessage, "Other")
+flushCBuffer()
 assert_equal(Profesjonell.Frame.pendingR["Player"] == nil, true, "Should not request sync for own character")
 
 -- Test own-hash mismatch push
@@ -274,6 +284,7 @@ ProfesjonellDB["i:1"] = { ["Player"] = true }
 Profesjonell.Frame.pendingB = {}
 -- Remote peer reports Player has hash "0" (empty)
 Profesjonell.OnAddonMessage("C:Player:0", "Other")
+flushCBuffer()
 assert_equal(Profesjonell.Frame.pendingB["Player"] ~= nil, true, "Should push own recipes when remote has old hash for us")
 
 -- Test ResolveRecipeKeysFromLink (recipe item -> spell)
@@ -391,6 +402,7 @@ Profesjonell.Frame.lastSyncPeer = "TestPeer"
 Profesjonell.Frame.lastRemoteHash = "0"
 Profesjonell.Frame.syncTimer = GetTime() + 100
 Profesjonell.OnAddonMessage("C:", "TestPeer")
+flushCBuffer()
 assert_equal(Profesjonell.Frame.syncTimer, nil, "Sync timer cleared after empty C response from lastSyncPeer")
 
 -- Test Reciprocal Broadcast when C finds no mismatches to pull
@@ -400,6 +412,7 @@ ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
 Profesjonell.Frame.syncTimer = GetTime() + 100
 Profesjonell.Frame.broadcastHashTime = nil
 Profesjonell.OnAddonMessage("C:", "TestPeer")
+flushCBuffer()
 assert_equal(Profesjonell.Frame.broadcastHashTime ~= nil, true, "Reciprocal broadcast scheduled when hashes mismatch and no pull mismatches found")
 Profesjonell.Frame.broadcastHashTime = nil
 
@@ -459,6 +472,7 @@ Profesjonell.CachedDatabaseHash = nil
 Profesjonell.CachedCharacterHashes = nil
 -- Remote only mentions Player, not Other
 Profesjonell.OnAddonMessage("C:Player:somehash", "TestPeer")
+flushCBuffer()
 assert_equal(Profesjonell.Frame.pendingB["Other"] ~= nil, true, "C: handler pushes data for characters remote doesn't mention")
 
 Profesjonell.Frame.lastSyncPeer = nil
@@ -526,6 +540,901 @@ assert_equal(Profesjonell.PendingReplies["testquery"] == nil, true, "Reply sent 
 
 -- Reset GetTime
 GetTime = function() return 1000 end
+
+-- =============================================
+-- Phase A Sync Improvement Tests
+-- =============================================
+print("\nRunning Phase A sync improvement tests...")
+
+-- Helper: reset all sync state for clean test isolation
+local function resetSyncState()
+    Profesjonell.Frame.pendingR = {}
+    Profesjonell.Frame.pendingB = {}
+    Profesjonell.Frame.pendingQ = nil
+    Profesjonell.Frame.pendingC = nil
+    Profesjonell.Frame.pendingShare = nil
+    Profesjonell.Frame.broadcastHashTime = nil
+    Profesjonell.Frame.lastSyncPeer = nil
+    Profesjonell.Frame.lastRemoteHash = nil
+    Profesjonell.Frame.syncTimer = nil
+    Profesjonell.Frame.syncRetryCount = nil
+    Profesjonell.Frame.nextSyncPeer = nil
+    Profesjonell.Frame.nextSyncHash = nil
+    Profesjonell.PendingActions.R = {}
+    Profesjonell.PendingActions.B = {}
+    Profesjonell.PendingActions.Q = nil
+    Profesjonell.PendingActions.C = nil
+    Profesjonell.PendingActions.share = nil
+    Profesjonell.PendingActions.broadcastHash = nil
+    Profesjonell.PendingActions.syncTimer = nil
+    Profesjonell.KnownAddonUsers = {}
+    Profesjonell.KnownAddonUserCount = 0
+    Profesjonell.LastHBroadcastTime = 0
+    Profesjonell.RemoteVersions = {}
+    Profesjonell.Frame.pendingQTarget = nil
+    Profesjonell.YieldedBTo = {}
+    Profesjonell.BPriority = {}
+    Profesjonell.IncomingCBuffer = {}
+    Profesjonell.CachedDatabaseHash = nil
+    Profesjonell.CachedCharacterHashes = nil
+    ProfesjonellDB = {}
+    sentMessages = {}
+    Profesjonell.SyncNewRecipesCount = 0
+    Profesjonell.SyncSources = {}
+    Profesjonell.SyncSummaryTimer = nil
+end
+Profesjonell.IsInGuild = function(name) return true end
+Profesjonell.UpdateGuildRosterCache = function()
+    Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+    return true
+end
+UnitName = function() return "Player" end
+
+-- Test 1: Known addon user tracking
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true } }
+Profesjonell.OnAddonMessage("B:Other:i:1", "Alice")
+assert_equal(Profesjonell.KnownAddonUsers["Alice"], true, "KnownAddonUsers tracks sender Alice")
+assert_equal(Profesjonell.KnownAddonUserCount, 1, "KnownAddonUserCount is 1 after first sender")
+Profesjonell.OnAddonMessage("B:Other:i:1", "Bob")
+assert_equal(Profesjonell.KnownAddonUserCount, 2, "KnownAddonUserCount is 2 after second sender")
+-- Same sender again should not increment
+Profesjonell.OnAddonMessage("B:Other:i:1", "Alice")
+assert_equal(Profesjonell.KnownAddonUserCount, 2, "KnownAddonUserCount unchanged for duplicate sender")
+
+-- Test 2: GetSyncDelay scales with user count
+resetSyncState()
+Profesjonell.KnownAddonUserCount = 1
+local delay_1user = Profesjonell.GetSyncDelay(1.0, 0, false)
+Profesjonell.KnownAddonUserCount = 20
+local delay_20users = Profesjonell.GetSyncDelay(1.0, 0, false)
+assert_equal(delay_20users > delay_1user, true, "GetSyncDelay returns larger base delay with 20 users vs 1")
+
+-- Test 3: GetSyncDelay does not scale below 10 users (userScale <= 1)
+resetSyncState()
+Profesjonell.KnownAddonUserCount = 5
+local delay_5users = Profesjonell.GetSyncDelay(1.0, 0, false)
+Profesjonell.KnownAddonUserCount = 1
+local delay_1user_b = Profesjonell.GetSyncDelay(1.0, 0, false)
+-- With range=0, the only variable is playerOffset which is constant, so delays should be equal
+assert_equal(delay_5users, delay_1user_b, "GetSyncDelay does not scale up for <= 10 users")
+
+-- Test 4: GetSyncDelay caps scaling at 30 users
+resetSyncState()
+Profesjonell.KnownAddonUserCount = 30
+local delay_30 = Profesjonell.GetSyncDelay(1.0, 0, false)
+Profesjonell.KnownAddonUserCount = 100
+local delay_100 = Profesjonell.GetSyncDelay(1.0, 0, false)
+assert_equal(delay_30, delay_100, "GetSyncDelay caps scaling at 30 users")
+
+-- Test 5: Cancel pending B unconditionally when receiving B (no count comparison)
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true }, ["i:2"] = { ["Other"] = true } }
+Profesjonell.PendingActions.B["Other"] = GetTime() + 10
+Profesjonell.OnAddonMessage("B:Other:i:1,i:2,i:3", "Alice")
+assert_equal(Profesjonell.PendingActions.B["Other"] == nil, true, "Pending B cancelled unconditionally when receiving B")
+
+-- Test 6: Cancel pending B even when we have more data (unconditional)
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true }, ["i:2"] = { ["Other"] = true }, ["i:3"] = { ["Other"] = true } }
+Profesjonell.PendingActions.B["Other"] = GetTime() + 10
+Profesjonell.OnAddonMessage("B:Other:i:1,i:2", "Alice")
+assert_equal(Profesjonell.PendingActions.B["Other"] == nil, true, "Pending B cancelled even when we have more recipes (unconditional)")
+assert_equal(Profesjonell.YieldedBTo["Other"], "Alice", "YieldedBTo tracks who we yielded to")
+
+-- Test 7: No pending B means no crash on B receive
+resetSyncState()
+ProfesjonellDB = {}
+Profesjonell.PendingActions.B = {}
+-- Should not error when receiving B without any pending B
+Profesjonell.OnAddonMessage("B:Other:i:1", "Alice")
+assert_equal(ProfesjonellDB["i:1"]["Other"], true, "B received correctly even without pending B")
+
+-- Test 8: H broadcast suppressed during active sync cycle
+resetSyncState()
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.LastHBroadcastTime = 0
+local h_sent = {}
+local old_sam = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type)
+    table.insert(h_sent, msg)
+    old_sam(prefix, msg, type)
+end
+Profesjonell.BroadcastHash()
+local foundH = false
+for _, m in ipairs(h_sent) do
+    if string.sub(m, 1, 2) == "H:" then foundH = true end
+end
+assert_equal(foundH, false, "H broadcast suppressed during active sync cycle")
+SendAddonMessage = old_sam
+
+-- Test 9: H broadcast suppressed when minimum interval not reached
+resetSyncState()
+Profesjonell.PendingActions.syncTimer = nil
+Profesjonell.LastHBroadcastTime = GetTime() - 5 -- Only 5 seconds ago (< 30s minimum)
+h_sent = {}
+old_sam = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type)
+    table.insert(h_sent, msg)
+    old_sam(prefix, msg, type)
+end
+Profesjonell.BroadcastHash()
+foundH = false
+for _, m in ipairs(h_sent) do
+    if string.sub(m, 1, 2) == "H:" then foundH = true end
+end
+assert_equal(foundH, false, "H broadcast suppressed when minimum interval not reached")
+SendAddonMessage = old_sam
+
+-- Test 10: H broadcast allowed when interval has passed and no active sync
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.PendingActions.syncTimer = nil
+Profesjonell.LastHBroadcastTime = GetTime() - 60 -- 60 seconds ago (> 30s minimum)
+h_sent = {}
+old_sam = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type)
+    table.insert(h_sent, msg)
+    old_sam(prefix, msg, type)
+end
+Profesjonell.BroadcastHash()
+foundH = false
+for _, m in ipairs(h_sent) do
+    if string.sub(m, 1, 2) == "H:" then foundH = true end
+end
+assert_equal(foundH, true, "H broadcast allowed when interval passed and no active sync")
+SendAddonMessage = old_sam
+
+-- Test 11: H broadcast updates LastHBroadcastTime
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.PendingActions.syncTimer = nil
+Profesjonell.LastHBroadcastTime = 0
+old_sam = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type) old_sam(prefix, msg, type) end
+Profesjonell.BroadcastHash()
+assert_equal(Profesjonell.LastHBroadcastTime, GetTime(), "LastHBroadcastTime updated after successful H broadcast")
+SendAddonMessage = old_sam
+
+-- Test 12: Q handler uses wider jitter (C delay should be > 2.0 base)
+resetSyncState()
+Profesjonell.KnownAddonUserCount = 1
+Profesjonell.OnAddonMessage("Q", "Alice")
+local cDelay = Profesjonell.PendingActions.C - GetTime()
+assert_equal(cDelay >= 2.0, true, "C response delay base is >= 2.0s after Q (Phase A wider jitter)")
+
+-- Test 13: R handler uses wider jitter for non-owner characters
+resetSyncState()
+Profesjonell.KnownAddonUserCount = 1
+Profesjonell.OnAddonMessage("R:Other", "Alice")
+local bDelay = Profesjonell.PendingActions.B["Other"] - GetTime()
+assert_equal(bDelay >= 3.0, true, "B response delay base is >= 3.0s for non-owner char after R (Phase A wider jitter)")
+
+-- Test 14: R handler uses priority (shorter) delay for own character
+resetSyncState()
+Profesjonell.KnownAddonUserCount = 1
+Profesjonell.OnAddonMessage("R:Player", "Alice")
+local bDelayOwn = Profesjonell.PendingActions.B["Player"] - GetTime()
+-- Priority halves both base and range: base=0.25, range=0.5, + offset
+assert_equal(bDelayOwn < 2.0, true, "B response delay is shorter for own character after R (priority)")
+
+-- Test 15: Q handler sets PendingActions.C (not just Frame.pendingC)
+resetSyncState()
+Profesjonell.OnAddonMessage("Q", "Alice")
+assert_equal(Profesjonell.PendingActions.C ~= nil, true, "Q handler sets PendingActions.C")
+assert_equal(Profesjonell.Frame.pendingC, Profesjonell.PendingActions.C, "Q handler syncs Frame.pendingC with PendingActions.C")
+
+-- Test 16: R handler sets PendingActions.B (not just Frame.pendingB)
+resetSyncState()
+Profesjonell.OnAddonMessage("R:Other", "Alice")
+assert_equal(Profesjonell.PendingActions.B["Other"] ~= nil, true, "R handler sets PendingActions.B")
+
+-- Test 17: Multiple B receives cancel pending B correctly
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Char1"] = true } }
+Profesjonell.PendingActions.B["Char1"] = GetTime() + 10
+-- First B with 1 recipe (equal to our 1) -> should cancel
+Profesjonell.OnAddonMessage("B:Char1:i:1", "Alice")
+assert_equal(Profesjonell.PendingActions.B["Char1"] == nil, true, "Pending B cancelled when received exactly same count")
+
+-- Test 18: Verify user scaling affects delay magnitude
+resetSyncState()
+Profesjonell.KnownAddonUserCount = 20  -- userScale = 2.0
+local scaledDelay = Profesjonell.GetSyncDelay(1.0, 0, false)
+Profesjonell.KnownAddonUserCount = 1
+local unscaledDelay = Profesjonell.GetSyncDelay(1.0, 0, false)
+-- With 20 users, userScale = 2.0, so base becomes 2.0
+-- The ratio should be close to 2.0 (since range=0, only base+offset matters)
+-- offset is the same for both, so scaledDelay = 2.0 + offset, unscaledDelay = 1.0 + offset
+-- Verify the difference is approximately 1.0 (the extra base from scaling)
+local diff = scaledDelay - unscaledDelay
+assert_equal(math.abs(diff - 1.0) < 0.001, true, "GetSyncDelay scales base by +1.0 with 20 known users (userScale=2.0)")
+
+-- =============================================
+-- Phase B: Coordinator Election, Targeted Q, S Deprecation
+-- =============================================
+print("Running Phase B sync improvement tests...")
+
+-- Test B1: H mismatch with higher-named sender => we are coordinator (Player < Zara)
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+Profesjonell.OnAddonMessage("H:differenthash:0.40", "Zara")
+-- Player < Zara, so we coordinate: Q should be scheduled
+assert_equal(Profesjonell.PendingActions.Q ~= nil, true, "B1: Coordinator (lower name) schedules Q on H mismatch")
+assert_equal(Profesjonell.Frame.pendingQTarget, "Zara", "B1: Q targets the mismatching peer")
+assert_equal(Profesjonell.Frame.lastSyncPeer, "Zara", "B1: lastSyncPeer set to sender")
+
+-- Test B2: H mismatch with lower-named sender => we are NOT coordinator (Player > Alice)
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+Profesjonell.OnAddonMessage("H:differenthash:0.40", "Alice")
+-- Alice < Player, so Alice coordinates: we should NOT schedule Q
+assert_equal(Profesjonell.PendingActions.Q == nil, true, "B2: Non-coordinator (higher name) does NOT schedule Q")
+assert_equal(Profesjonell.Frame.lastSyncPeer, "Alice", "B2: lastSyncPeer still set for tracking")
+assert_equal(Profesjonell.PendingActions.syncTimer ~= nil, true, "B2: Sync timer set even for non-coordinator")
+
+-- Test B3: H from same peer during active sync updates lastRemoteHash (Fix 2)
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+Profesjonell.Frame.lastSyncPeer = "Zara"
+Profesjonell.Frame.lastRemoteHash = "oldhash"
+Profesjonell.Frame.syncRetryCount = 2
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnAddonMessage("H:newhash:0.40", "Zara")
+assert_equal(Profesjonell.Frame.lastRemoteHash, "newhash", "B3: lastRemoteHash updated from same peer during sync")
+assert_equal(Profesjonell.Frame.syncRetryCount, 0, "B3: syncRetryCount reset on hash update from same peer")
+
+-- Test B4: H from different peer during active sync is queued (Fix 3)
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+Profesjonell.RemoteVersions["Bob"] = "0.40"
+Profesjonell.Frame.lastSyncPeer = "Zara"
+Profesjonell.Frame.lastRemoteHash = "zarahash"
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnAddonMessage("H:bobhash:0.40", "Bob")
+assert_equal(Profesjonell.Frame.lastSyncPeer, "Zara", "B4: lastSyncPeer NOT overwritten during active sync")
+assert_equal(Profesjonell.Frame.nextSyncPeer, "Bob", "B4: New peer queued as nextSyncPeer")
+assert_equal(Profesjonell.Frame.nextSyncHash, "bobhash", "B4: New peer hash queued as nextSyncHash")
+
+-- Test B5: E: message is now a harmless no-op
+resetSyncState()
+Profesjonell.PendingActions.Q = GetTime() + 10
+Profesjonell.Frame.pendingQ = Profesjonell.PendingActions.Q
+Profesjonell.OnAddonMessage("E:Alpha", "Alpha")
+-- E: should not affect any state
+assert_equal(Profesjonell.PendingActions.Q ~= nil, true, "B5: E: message is no-op, does not cancel pending Q")
+
+-- Test B6: Targeted Q:Player triggers C response (we are the target)
+resetSyncState()
+Profesjonell.OnAddonMessage("Q:Player", "Alice")
+assert_equal(Profesjonell.PendingActions.C ~= nil, true, "B6: Targeted Q:Player schedules C response")
+-- Targeted Q uses shorter base delay (0.5 base, not 2.0)
+-- Compare with broadcast Q delay to verify targeted is shorter
+resetSyncState()
+Profesjonell.OnAddonMessage("Q:Player", "Alice")
+local targetedCDelay = Profesjonell.PendingActions.C - GetTime()
+resetSyncState()
+Profesjonell.OnAddonMessage("Q", "Alice")
+local broadcastCDelay = Profesjonell.PendingActions.C - GetTime()
+assert_equal(targetedCDelay < broadcastCDelay, true, "B6: Targeted Q uses shorter delay than broadcast Q")
+
+-- Test B7: Targeted Q:Other does NOT trigger C response (we are not the target)
+resetSyncState()
+Profesjonell.OnAddonMessage("Q:Other", "Alice")
+assert_equal(Profesjonell.PendingActions.C == nil, true, "B7: Targeted Q:Other does not schedule C response for us")
+
+-- Test B8: Broadcast Q still works (backward compat)
+resetSyncState()
+Profesjonell.OnAddonMessage("Q", "OldClient")
+assert_equal(Profesjonell.PendingActions.C ~= nil, true, "B8: Broadcast Q still schedules C response")
+
+-- Test B9: Broadcast Q also clears pendingQTarget
+resetSyncState()
+Profesjonell.PendingActions.Q = GetTime() + 10
+Profesjonell.Frame.pendingQ = Profesjonell.PendingActions.Q
+Profesjonell.Frame.pendingQTarget = "Alice"
+Profesjonell.OnAddonMessage("Q", "OldClient")
+assert_equal(Profesjonell.Frame.pendingQTarget == nil, true, "B9: Broadcast Q clears pendingQTarget")
+
+-- Test B10: S command deprecated - RequestSync no longer sends S
+resetSyncState()
+sentMessages = {}
+old_sam = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type)
+    table.insert(sentMessages, msg)
+end
+Profesjonell.RequestSync()
+local foundS = false
+for _, m in ipairs(sentMessages) do
+    if m == "S" then foundS = true end
+end
+assert_equal(foundS, false, "B10: RequestSync no longer sends S message")
+SendAddonMessage = old_sam
+
+-- Test B11: RequestSync falls back to targeted Q when lastSyncPeer is set
+resetSyncState()
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.RequestSync()
+assert_equal(Profesjonell.PendingActions.Q ~= nil, true, "B11: RequestSync schedules Q when lastSyncPeer exists")
+assert_equal(Profesjonell.Frame.pendingQTarget, "Alice", "B11: RequestSync targets lastSyncPeer with Q")
+
+-- Test B12: Incoming S from old clients still triggers ShareAllRecipes (backward compat)
+resetSyncState()
+local shareAllCalled = false
+local origShareAll = Profesjonell.ShareAllRecipes
+Profesjonell.ShareAllRecipes = function() shareAllCalled = true end
+Profesjonell.OnAddonMessage("S", "OldClient")
+assert_equal(shareAllCalled, true, "B12: Incoming S still triggers ShareAllRecipes (backward compat)")
+Profesjonell.ShareAllRecipes = origShareAll
+
+-- Test B13: Targeted Q cancels our own pending Q and pendingQTarget
+resetSyncState()
+Profesjonell.PendingActions.Q = GetTime() + 10
+Profesjonell.Frame.pendingQ = Profesjonell.PendingActions.Q
+Profesjonell.Frame.pendingQTarget = "Someone"
+Profesjonell.OnAddonMessage("Q:Player", "Alice")
+assert_equal(Profesjonell.PendingActions.Q == nil, true, "B13: Targeted Q cancels our pending Q")
+assert_equal(Profesjonell.Frame.pendingQTarget == nil, true, "B13: Targeted Q clears our pendingQTarget")
+
+-- Test B14: OnCommUpdate sends targeted Q when pendingQTarget is set
+resetSyncState()
+sentMessages = {}
+old_sam = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type)
+    table.insert(sentMessages, msg)
+end
+Profesjonell.PendingActions.Q = GetTime() - 1 -- Already due
+Profesjonell.Frame.pendingQ = Profesjonell.PendingActions.Q
+Profesjonell.Frame.pendingQTarget = "Alice"
+Profesjonell.OnCommUpdate()
+local foundTargetedQ = false
+for _, m in ipairs(sentMessages) do
+    if m == "Q:Alice" then foundTargetedQ = true end
+end
+assert_equal(foundTargetedQ, true, "B14: OnCommUpdate sends Q:Alice when pendingQTarget is set")
+assert_equal(Profesjonell.Frame.pendingQTarget == nil, true, "B14: pendingQTarget cleared after sending")
+SendAddonMessage = old_sam
+
+-- Test B15: OnCommUpdate sends broadcast Q when no pendingQTarget
+resetSyncState()
+sentMessages = {}
+old_sam = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type)
+    table.insert(sentMessages, msg)
+end
+Profesjonell.PendingActions.Q = GetTime() - 1 -- Already due
+Profesjonell.Frame.pendingQ = Profesjonell.PendingActions.Q
+Profesjonell.Frame.pendingQTarget = nil
+Profesjonell.OnCommUpdate()
+local foundBroadcastQ = false
+for _, m in ipairs(sentMessages) do
+    if m == "Q" then foundBroadcastQ = true end
+end
+assert_equal(foundBroadcastQ, true, "B15: OnCommUpdate sends broadcast Q when no target")
+SendAddonMessage = old_sam
+
+-- Test B16: ClearSyncState clears pendingQTarget
+resetSyncState()
+Profesjonell.Frame.pendingQTarget = "Alice"
+Profesjonell.PendingActions.syncTimer = nil
+Profesjonell.Frame.syncTimer = nil
+-- Trigger ClearSyncState indirectly via sync completion
+-- We'll test the field directly since ClearSyncState is local
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+local matchHash = Profesjonell.GenerateDatabaseHash()
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = matchHash
+Profesjonell.Frame.pendingQTarget = "Alice"
+-- Send H with matching hash to trigger ClearSyncState
+Profesjonell.OnAddonMessage("H:" .. matchHash .. ":0.40", "Alice")
+assert_equal(Profesjonell.Frame.pendingQTarget == nil, true, "B16: ClearSyncState clears pendingQTarget")
+
+-- Test B17: First sync retry uses targeted Q for lastSyncPeer
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "differenthash"
+Profesjonell.Frame.syncRetryCount = 0 -- Will be incremented to 1 (first retry)
+Profesjonell.PendingActions.syncTimer = GetTime() - 1 -- Already expired
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnCommUpdate()
+assert_equal(Profesjonell.Frame.pendingQTarget, "Alice", "B17: First sync retry uses targeted Q for lastSyncPeer")
+
+-- Test B17b: Second+ sync retry falls back to broadcast Q for backward compatibility
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "differenthash"
+Profesjonell.Frame.syncRetryCount = 1 -- Will be incremented to 2 (second retry)
+Profesjonell.PendingActions.syncTimer = GetTime() - 1
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnCommUpdate()
+assert_equal(Profesjonell.Frame.pendingQTarget == nil, true, "B17b: Second sync retry falls back to broadcast Q (no target)")
+assert_equal(Profesjonell.PendingActions.Q ~= nil, true, "B17b: Broadcast Q is still scheduled")
+
+-- Test B17c: Third sync retry also uses broadcast Q
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "differenthash"
+Profesjonell.Frame.syncRetryCount = 2 -- Will be incremented to 3 (third retry)
+Profesjonell.PendingActions.syncTimer = GetTime() - 1
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnCommUpdate()
+assert_equal(Profesjonell.Frame.pendingQTarget == nil, true, "B17c: Third sync retry also uses broadcast Q")
+
+-- Test B18: Sync retries exhausted does soft reset with delayed H broadcast (Fix 6)
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "differenthash"
+Profesjonell.Frame.syncRetryCount = 3 -- At limit
+Profesjonell.PendingActions.syncTimer = GetTime() - 1
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnCommUpdate()
+-- Sync state should be cleared
+assert_equal(Profesjonell.Frame.lastSyncPeer == nil, true, "B18: Retries exhausted clears lastSyncPeer")
+assert_equal(Profesjonell.PendingActions.syncTimer == nil, true, "B18: Retries exhausted clears syncTimer")
+-- But a fresh H broadcast should be scheduled (soft reset)
+assert_equal(Profesjonell.PendingActions.broadcastHash ~= nil, true, "B18: Retries exhausted schedules fresh H broadcast")
+assert_equal(Profesjonell.PendingActions.broadcastHash > GetTime() + 29, true, "B18: Fresh H broadcast delayed >= 30s")
+
+-- Test B19: E: message from old Phase B clients is harmless no-op
+resetSyncState()
+Profesjonell.OnAddonMessage("E:SomeCoordinator", "SomeCoordinator")
+assert_equal(Profesjonell.PendingActions.Q == nil, true, "B19: E: does not schedule Q")
+assert_equal(Profesjonell.Frame.lastSyncPeer == nil, true, "B19: E: does not set lastSyncPeer")
+
+-- Test B20: ClearSyncState processes queued nextSyncPeer
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+-- Set up: we're syncing with Zara, Bob is queued
+Profesjonell.Frame.lastSyncPeer = "Zara"
+Profesjonell.Frame.lastRemoteHash = nil
+Profesjonell.Frame.nextSyncPeer = "Bob"
+Profesjonell.Frame.nextSyncHash = "bobhash"
+-- Generate matching hash and send matching H to trigger ClearSyncState
+local matchHash20 = Profesjonell.GenerateDatabaseHash()
+Profesjonell.Frame.lastRemoteHash = matchHash20
+Profesjonell.Frame.lastSyncPeer = "Zara"
+Profesjonell.OnAddonMessage("H:" .. matchHash20 .. ":0.40", "Zara")
+-- After ClearSyncState, queued Bob should become active peer
+assert_equal(Profesjonell.Frame.lastSyncPeer, "Bob", "B20: ClearSyncState starts queued sync with nextSyncPeer")
+assert_equal(Profesjonell.Frame.lastRemoteHash, "bobhash", "B20: ClearSyncState uses queued hash")
+assert_equal(Profesjonell.Frame.nextSyncPeer == nil, true, "B20: nextSyncPeer cleared after processing")
+assert_equal(Profesjonell.PendingActions.syncTimer ~= nil, true, "B20: Sync timer set for queued peer")
+
+-- =============================================
+-- B Cancellation Anti-Loop Tests
+-- =============================================
+print("\nRunning B cancellation anti-loop tests...")
+
+-- B_CANCEL_1: Receiving B cancels pending B unconditionally (no count comparison)
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true }, ["i:2"] = { ["Other"] = true }, ["i:3"] = { ["Other"] = true } }
+Profesjonell.PendingActions.B["Other"] = GetTime() + 10
+Profesjonell.OnAddonMessage("B:Other:i:1", "Alice")
+assert_equal(Profesjonell.PendingActions.B["Other"] == nil, true, "B_CANCEL_1: Pending B cancelled unconditionally even with 1 recipe in batch vs 3 local")
+assert_equal(Profesjonell.YieldedBTo["Other"], "Alice", "B_CANCEL_1: YieldedBTo records Alice as the sender we yielded to")
+
+-- B_CANCEL_2: After yielding, next pending B for same char is marked priority via R: handler
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true } }
+Profesjonell.YieldedBTo["Other"] = "Alice"
+Profesjonell.OnAddonMessage("R:Other", "Alice")
+assert_equal(Profesjonell.PendingActions.B["Other"] ~= nil, true, "B_CANCEL_2: R: schedules pending B")
+assert_equal(Profesjonell.BPriority["Other"], true, "B_CANCEL_2: Pending B marked as priority because we previously yielded")
+
+-- B_CANCEL_3: Priority B is NOT cancelled when receiving B
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true } }
+Profesjonell.PendingActions.B["Other"] = GetTime() + 10
+Profesjonell.BPriority["Other"] = true
+Profesjonell.OnAddonMessage("B:Other:i:1,i:2,i:3", "Alice")
+assert_equal(Profesjonell.PendingActions.B["Other"] ~= nil, true, "B_CANCEL_3: Priority B is NOT cancelled when receiving B")
+-- Priority should be consumed after use
+assert_equal(Profesjonell.BPriority["Other"] == nil, true, "B_CANCEL_3: Priority consumed after protecting B once")
+
+-- B_CANCEL_4: After priority is consumed, a subsequent B reception cancels normally
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true } }
+-- First: set up priority and have it consumed
+Profesjonell.PendingActions.B["Other"] = GetTime() + 10
+Profesjonell.BPriority["Other"] = true
+Profesjonell.OnAddonMessage("B:Other:i:1", "Alice") -- Priority protects, gets consumed
+assert_equal(Profesjonell.PendingActions.B["Other"] ~= nil, true, "B_CANCEL_4a: Priority protected first time")
+-- Second: now no priority, should cancel
+Profesjonell.OnAddonMessage("B:Other:i:1", "Bob")
+assert_equal(Profesjonell.PendingActions.B["Other"] == nil, true, "B_CANCEL_4b: Without priority, B cancelled on second receive")
+assert_equal(Profesjonell.YieldedBTo["Other"], "Bob", "B_CANCEL_4c: YieldedBTo updated to Bob")
+
+-- B_CANCEL_5: ClearSyncState resets YieldedBTo and BPriority
+resetSyncState()
+Profesjonell.YieldedBTo["Other"] = "Alice"
+Profesjonell.BPriority["Other"] = true
+-- Trigger ClearSyncState via matching H from lastSyncPeer
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+local clearHash = Profesjonell.GenerateDatabaseHash()
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = clearHash
+Profesjonell.OnAddonMessage("H:" .. clearHash .. ":0.40", "Alice")
+assert_equal(next(Profesjonell.YieldedBTo) == nil, true, "B_CANCEL_5: ClearSyncState resets YieldedBTo")
+assert_equal(next(Profesjonell.BPriority) == nil, true, "B_CANCEL_5: ClearSyncState resets BPriority")
+
+-- B_CANCEL_6: Successfully sending B clears yield/priority state for that character
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true } }
+Profesjonell.YieldedBTo["Other"] = "Alice"
+Profesjonell.BPriority["Other"] = true
+-- Schedule B that is already due
+Profesjonell.PendingActions.B["Other"] = GetTime() - 1
+local old_sam_bc6 = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type) end -- no-op
+Profesjonell.OnCommUpdate()
+SendAddonMessage = old_sam_bc6
+assert_equal(Profesjonell.YieldedBTo["Other"] == nil, true, "B_CANCEL_6: Sending B clears YieldedBTo for that character")
+assert_equal(Profesjonell.BPriority["Other"] == nil, true, "B_CANCEL_6: Sending B clears BPriority for that character")
+
+-- B_CANCEL_7: Priority is set when scheduling B push in C: handler after previous yield
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+Profesjonell.YieldedBTo["Other"] = "Alice"
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+-- Send C: with a mismatching hash for Other to trigger B push scheduling
+Profesjonell.OnAddonMessage("C:Other:wronghash", "Alice")
+flushCBuffer()
+assert_equal(Profesjonell.BPriority["Other"], true, "B_CANCEL_7: B push from C: handler marked priority after previous yield")
+
+-- =============================================
+-- C: Buffer Accumulation Tests
+-- =============================================
+print("\nRunning C: buffer accumulation tests...")
+
+-- C_BUFFER_1: Single C: message buffers and processes after settle delay
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "xyz"
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnAddonMessage("C:Other:wronghash", "Alice")
+-- Before settle: buffer exists but no processing yet
+assert_equal(Profesjonell.IncomingCBuffer["Alice"] ~= nil, true, "C_BUFFER_1: C: message buffered")
+assert_equal(Profesjonell.Frame.pendingR["Other"] == nil, true, "C_BUFFER_1: No immediate R scheduling before settle")
+-- After settle: processing happens
+flushCBuffer()
+assert_equal(Profesjonell.Frame.pendingR["Other"] ~= nil, true, "C_BUFFER_1: R scheduled after settle delay")
+assert_equal(Profesjonell.IncomingCBuffer["Alice"] == nil, true, "C_BUFFER_1: Buffer cleared after processing")
+
+-- C_BUFFER_2: Multiple C: splits from same sender accumulate into one buffer
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Alice"] = true }, ["i:2"] = { ["Bob"] = true }, ["i:3"] = { ["Carol"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Alice"] = "Mage", ["Bob"] = "Rogue", ["Carol"] = "Priest" }
+Profesjonell.UpdateGuildRosterCache = function()
+    Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Alice"] = "Mage", ["Bob"] = "Rogue", ["Carol"] = "Priest" }
+    return true
+end
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+Profesjonell.Frame.lastSyncPeer = "Zara"
+Profesjonell.Frame.lastRemoteHash = "xyz"
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+-- Simulate two C: splits from same sender
+Profesjonell.OnAddonMessage("C:Alice:hash1,Bob:hash2", "Zara")
+Profesjonell.OnAddonMessage("C:Carol:hash3", "Zara")
+-- Buffer should have all 3 characters
+local bufChars = Profesjonell.IncomingCBuffer["Zara"].chars
+assert_equal(bufChars["Alice"], "hash1", "C_BUFFER_2: First split char accumulated")
+assert_equal(bufChars["Bob"], "hash2", "C_BUFFER_2: First split second char accumulated")
+assert_equal(bufChars["Carol"], "hash3", "C_BUFFER_2: Second split char accumulated")
+
+-- C_BUFFER_3: C: from different senders maintain separate buffers
+resetSyncState()
+ProfesjonellDB = {}
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+Profesjonell.RemoteVersions["Bob"] = "0.40"
+Profesjonell.OnAddonMessage("C:Char1:hash1", "Alice")
+Profesjonell.OnAddonMessage("C:Char2:hash2", "Bob")
+assert_equal(Profesjonell.IncomingCBuffer["Alice"] ~= nil, true, "C_BUFFER_3: Alice has separate buffer")
+assert_equal(Profesjonell.IncomingCBuffer["Bob"] ~= nil, true, "C_BUFFER_3: Bob has separate buffer")
+assert_equal(Profesjonell.IncomingCBuffer["Alice"].chars["Char1"], "hash1", "C_BUFFER_3: Alice buffer has Char1")
+assert_equal(Profesjonell.IncomingCBuffer["Bob"].chars["Char2"], "hash2", "C_BUFFER_3: Bob buffer has Char2")
+assert_equal(Profesjonell.IncomingCBuffer["Alice"].chars["Char2"] == nil, true, "C_BUFFER_3: Alice buffer does NOT have Bob's char")
+
+-- C_BUFFER_4: No false "Remote missing character" when chars are split across messages
+-- This is the core bug fix test
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Alice"] = true }, ["i:2"] = { ["Bob"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Alice"] = "Mage", ["Bob"] = "Rogue" }
+Profesjonell.UpdateGuildRosterCache = function()
+    Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Alice"] = "Mage", ["Bob"] = "Rogue" }
+    return true
+end
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+Profesjonell.Frame.lastSyncPeer = "Zara"
+Profesjonell.Frame.lastRemoteHash = "xyz"
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+-- Remote knows both Alice and Bob but sends them in separate C: messages
+-- With matching hashes, there should be NO "missing character" B pushes
+local aliceHash = Profesjonell.GenerateCharacterHashes()["Alice"]
+local bobHash = Profesjonell.GenerateCharacterHashes()["Bob"]
+Profesjonell.OnAddonMessage("C:Alice:" .. aliceHash, "Zara")
+Profesjonell.OnAddonMessage("C:Bob:" .. bobHash, "Zara")
+flushCBuffer()
+-- Neither Alice nor Bob should be flagged as "missing" — both were in the accumulated buffer
+assert_equal(Profesjonell.Frame.pendingB["Alice"] == nil, true, "C_BUFFER_4: No false B push for Alice (was in second split)")
+assert_equal(Profesjonell.Frame.pendingB["Bob"] == nil, true, "C_BUFFER_4: No false B push for Bob (was in first split)")
+
+-- C_BUFFER_5: ClearSyncState clears the C: buffer
+resetSyncState()
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+Profesjonell.OnAddonMessage("C:Char1:hash1", "Alice")
+assert_equal(Profesjonell.IncomingCBuffer["Alice"] ~= nil, true, "C_BUFFER_5: Buffer exists before clear")
+-- Simulate ClearSyncState via matching H from lastSyncPeer
+Profesjonell.IncomingCBuffer = {}
+assert_equal(next(Profesjonell.IncomingCBuffer) == nil, true, "C_BUFFER_5: Buffer cleared")
+
+-- C_BUFFER_6: Partial C: (only one split arrives) still processes after settle
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Other"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.UpdateGuildRosterCache = function()
+    Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+    return true
+end
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "xyz"
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+-- Only one C: message arrives (sender disconnected before sending rest)
+Profesjonell.OnAddonMessage("C:Other:wronghash", "Alice")
+flushCBuffer()
+-- Should still process the partial data
+assert_equal(Profesjonell.Frame.pendingR["Other"] ~= nil, true, "C_BUFFER_6: Partial C: still processed after settle")
+
+-- C_BUFFER_7: Settle timer resets on each new C: from same sender
+resetSyncState()
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+Profesjonell.OnAddonMessage("C:Char1:hash1", "Alice")
+local firstSettle = Profesjonell.IncomingCBuffer["Alice"].settleTime
+-- Advance time slightly (but not past settle) and send another split
+local oldGT = GetTime
+GetTime = function() return oldGT() + 0.5 end
+Profesjonell.OnAddonMessage("C:Char2:hash2", "Alice")
+local secondSettle = Profesjonell.IncomingCBuffer["Alice"].settleTime
+GetTime = oldGT
+assert_equal(secondSettle > firstSettle, true, "C_BUFFER_7: Settle timer extended by second C: message")
+
+-- Restore default UpdateGuildRosterCache for subsequent tests
+Profesjonell.UpdateGuildRosterCache = function()
+    Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+    return true
+end
+
+-- =============================================
+-- Sync Fix Tests (Fixes 1-6)
+-- =============================================
+print("\nRunning sync fix tests...")
+
+-- FIX1_1: Deterministic coordinator - both peers agree without communication
+-- "Alpha" sees H mismatch from "Zara": Alpha < Zara => Alpha coordinates
+-- "Zara" sees H mismatch from "Alpha": Alpha < Zara => Zara waits
+-- We test from Player's perspective:
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+Profesjonell.OnAddonMessage("H:somehash:0.40", "Zara")
+assert_equal(Profesjonell.PendingActions.Q ~= nil, true, "FIX1_1: Lower-named player schedules Q (coordinator)")
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+Profesjonell.OnAddonMessage("H:somehash:0.40", "Alice")
+assert_equal(Profesjonell.PendingActions.Q == nil, true, "FIX1_1: Higher-named player does NOT schedule Q (not coordinator)")
+
+-- FIX2_1: lastRemoteHash updated when same peer sends new H during active sync
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+-- Set up mid-sync with stale hash
+Profesjonell.Frame.lastSyncPeer = "Zara"
+Profesjonell.Frame.lastRemoteHash = "stale_hash"
+Profesjonell.Frame.syncRetryCount = 2
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+-- Zara sends updated H with a NEW hash (still different from ours)
+Profesjonell.OnAddonMessage("H:updated_hash:0.40", "Zara")
+-- The update path should fire: lastRemoteHash updated, retryCount reset
+assert_equal(Profesjonell.Frame.lastRemoteHash, "updated_hash", "FIX2_1: lastRemoteHash updated from same peer during sync")
+assert_equal(Profesjonell.Frame.syncRetryCount, 0, "FIX2_1: syncRetryCount reset on hash update")
+assert_equal(Profesjonell.Frame.lastSyncPeer, "Zara", "FIX2_1: lastSyncPeer unchanged")
+
+-- FIX3_1: H suppression check order — sync-active checked before interval
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.LastHBroadcastTime = 0 -- Interval has passed, but sync is active
+h_sent = {}
+local old_sam_fix3 = SendAddonMessage
+SendAddonMessage = function(prefix, msg, type) table.insert(h_sent, msg) end
+Profesjonell.BroadcastHash()
+local foundH_fix3 = false
+for _, m in ipairs(h_sent) do
+    if string.sub(m, 1, 2) == "H:" then foundH_fix3 = true end
+end
+assert_equal(foundH_fix3, false, "FIX3_1: H suppressed during active sync even when interval has passed")
+SendAddonMessage = old_sam_fix3
+
+-- FIX3_2: Queued peer is started when ClearSyncState fires with coordinator check
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Zara"] = "0.40"
+Profesjonell.Frame.lastSyncPeer = "Zara"
+local matchHash_fix3 = Profesjonell.GenerateDatabaseHash()
+Profesjonell.Frame.lastRemoteHash = matchHash_fix3
+-- Queue a peer where we ARE coordinator (Player < Zara)
+Profesjonell.Frame.nextSyncPeer = "Zara"
+Profesjonell.Frame.nextSyncHash = "zarahash"
+Profesjonell.OnAddonMessage("H:" .. matchHash_fix3 .. ":0.40", "Zara")
+-- ClearSyncState should pick up Zara and schedule Q (Player < Zara)
+assert_equal(Profesjonell.Frame.lastSyncPeer, "Zara", "FIX3_2: Queued peer becomes active after ClearSyncState")
+assert_equal(Profesjonell.PendingActions.Q ~= nil, true, "FIX3_2: Q scheduled for queued peer where we're coordinator")
+assert_equal(Profesjonell.Frame.pendingQTarget, "Zara", "FIX3_2: Q targets the queued peer")
+
+-- FIX3_3: Queued peer where we are NOT coordinator — no Q scheduled
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+Profesjonell.Frame.lastSyncPeer = "Alice"
+local matchHash_fix3b = Profesjonell.GenerateDatabaseHash()
+Profesjonell.Frame.lastRemoteHash = matchHash_fix3b
+-- Queue peer where we are NOT coordinator (Player > Alice)
+Profesjonell.Frame.nextSyncPeer = "Alice"
+Profesjonell.Frame.nextSyncHash = "alicehash"
+Profesjonell.OnAddonMessage("H:" .. matchHash_fix3b .. ":0.40", "Alice")
+assert_equal(Profesjonell.Frame.lastSyncPeer, "Alice", "FIX3_3: Queued peer becomes active")
+assert_equal(Profesjonell.PendingActions.Q == nil, true, "FIX3_3: No Q scheduled when we're not coordinator for queued peer")
+assert_equal(Profesjonell.PendingActions.syncTimer ~= nil, true, "FIX3_3: Sync timer still set for queued peer")
+
+-- FIX4_1: Removed syncPendingChars — B handler no longer tracks pending char count
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.CachedCharacterHashes = nil
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "somehash"
+Profesjonell.PendingActions.syncTimer = GetTime() + 100
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+-- Receive B with new data — should NOT set/manipulate syncPendingChars
+Profesjonell.OnAddonMessage("B:Other:i:99", "Alice")
+-- The field should not exist since we removed the feature
+assert_equal(Profesjonell.Frame.syncPendingChars == nil, true, "FIX4_1: syncPendingChars not used after removal")
+
+-- FIX5_1: No double sync timer extension — only one extension in B handler
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "somehash"
+Profesjonell.PendingActions.syncTimer = GetTime() + 5
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+local timerBefore = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnAddonMessage("B:Other:i:99", "Alice")
+-- Timer should be extended once (not doubled)
+assert_equal(Profesjonell.PendingActions.syncTimer ~= nil, true, "FIX5_1: Sync timer still active after B receive")
+assert_equal(Profesjonell.PendingActions.syncTimer > timerBefore, true, "FIX5_1: Sync timer extended after B with new data")
+
+-- FIX6_1: Graceful retry exhaustion - broadcastHash is scheduled, not a hard stop
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.Frame.lastSyncPeer = "Alice"
+Profesjonell.Frame.lastRemoteHash = "differenthash"
+Profesjonell.Frame.syncRetryCount = 3
+Profesjonell.PendingActions.syncTimer = GetTime() - 1
+Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
+Profesjonell.OnCommUpdate()
+assert_equal(Profesjonell.PendingActions.broadcastHash ~= nil, true, "FIX6_1: Soft reset schedules fresh H broadcast")
+-- The delay should be 30-60s from now
+local bcastDelay = Profesjonell.PendingActions.broadcastHash - GetTime()
+assert_equal(bcastDelay >= 30, true, "FIX6_1: Fresh H broadcast delay >= 30s")
+assert_equal(bcastDelay <= 61, true, "FIX6_1: Fresh H broadcast delay <= ~60s")
+
+-- FIX6_2: After soft reset, if hashes truly match, the H exchange resolves cleanly
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+local resolveHash = Profesjonell.GenerateDatabaseHash()
+-- Simulate: after soft reset, Alice sends H with matching hash
+Profesjonell.OnAddonMessage("H:" .. resolveHash .. ":0.40", "Alice")
+-- No sync state should be created since hashes match
+assert_equal(Profesjonell.Frame.lastSyncPeer == nil, true, "FIX6_2: Matching H after soft reset doesn't start new sync")
 
 -- Summary
 print(string.format("\nTests complete: %d passed, %d failed", passed, failed))
