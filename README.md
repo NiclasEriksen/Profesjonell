@@ -79,5 +79,3 @@ To run the automated test suite (146 tests), use a standalone Lua interpreter:
 ```bash
 lua test_runner.lua
 ```
-
-For more details on testing and development conventions, see the [development guidelines](.junie/guidelines.md)..
