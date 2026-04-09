@@ -7,6 +7,7 @@
 - **Automatic Scanning**: Automatically scans your profession windows (Trade Skills and Crafts) when you open them.
 - **Guild Sync**: Synchronizes known recipes with other guild members using an efficient, multi-phase protocol that minimizes addon channel traffic (see [Syncing](#syncing) below).
 - **Tooltip Integration**: Shows "Known by" information directly on item and recipe tooltips. Works with default UI, pfUI, and other UI overhauls. Also supports AtlasLoot tooltips.
+- **Recipe Search Window**: Browse and filter all known guild recipes in a two-pane window with category filtering, text search, rarity coloring, and chat linking.
 - **In-Game Search**: Search the guild database via slash commands or guild chat queries, with partial name matching and multi-match display.
 - **Officer Tools**: Manual management tools for guild officers to add/remove recipes or purge characters no longer in the guild.
 - **Smart Replies**: Automatically responds to guild chat queries (e.g., `?prof [Link]`) with built-in anti-collision logic.
@@ -20,7 +21,22 @@ Simply open your profession windows (Alchemy, Blacksmithing, Enchanting, etc.). 
 ### Tooltip Information
 Hover over any item or recipe. If anyone in the guild (including your own characters) knows how to craft it, a "Known by" line will appear at the bottom of the tooltip.
 
+### Recipe Search Window
+
+Type `/prof` without any arguments to open the recipe search window. This provides a browsable, filterable view of all known recipes across the guild.
+
+![Search Window](SearchWindowScreenshot.png)
+
+- **Text Filter**: Type in the search box at the top to filter recipes by name.
+- **Category Filter**: The left pane groups recipes by type — Item Enhancement, Equipment, Consumable, and Other — each showing the number of matching recipes. Click a category to filter, or select "All" to see everything.
+- **Recipe List**: The right pane displays matching recipes alphabetically, colored by rarity, with the names of guild members who know each recipe listed below.
+- **Tooltips**: Hover over a recipe to see its full tooltip (item-based recipes only).
+- **Chat Linking**: Shift-click a recipe to insert its link into chat.
+
+On first open, the window performs a one-time scan to categorize recipes, shown with a progress bar.
+
 ### Commands
+- `/prof` — Open the recipe search window.
 - `/prof [recipe name or link]` — Search the local database for characters who know a specific recipe. Supports partial name matching.
 - `/prof sync` — Manually request a synchronization from other guild members (30-second cooldown).
 - `/prof share` — Share your recipes with the guild.
@@ -71,11 +87,12 @@ Modules/
   Scanner.lua             -- Recipe link resolution and scanning logic
   Comm.lua                -- Addon-to-addon sync protocol
   UI.lua                  -- Tooltips, slash commands, and chat integration
+  SearchWindow.lua        -- Recipe search/browse window
 ```
 
 ## Development
 
-To run the automated test suite (146 tests), use a standalone Lua interpreter:
+To run the automated test suite, use a standalone Lua interpreter:
 ```bash
 lua test_runner.lua
 ```

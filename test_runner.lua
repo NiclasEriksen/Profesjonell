@@ -123,6 +123,16 @@ function GetTradeSkillItemLink(i) return nil end
 function GetNumCrafts() return 0 end
 function GetCraftInfo(i) return nil end
 function GetCraftItemLink(i) return nil end
+function GetTradeSkillLine() return "Alchemy" end
+function GetCraftDisplayName() return "Enchanting" end
+function IsShiftKeyDown() return false end
+function ChatEdit_InsertLink(link) end
+function FauxScrollFrame_Update() end
+function FauxScrollFrame_GetOffset() return 0 end
+function FauxScrollFrame_OnVerticalScroll() end
+UIParent = CreateFrame("Frame", "UIParent")
+UISpecialFrames = {}
+function tinsert(t, v) table.insert(t, v) end
 function SendAddonMessage(prefix, msg, type) end
 function SendChatMessage(msg, type) end
 function GetGuildRosterShowOffline() return 1 end
@@ -157,9 +167,11 @@ local modules = {
     "Modules/Utils.lua",
     "Modules/Guild.lua",
     "Modules/Database.lua",
+    "Modules/Professions.lua",
     "Modules/Scanner.lua",
     "Modules/Comm.lua",
-    "Modules/UI.lua"
+    "Modules/UI.lua",
+    "Modules/SearchWindow.lua"
 }
 
 print("Loading modules...")
@@ -1436,6 +1448,224 @@ Profesjonell.OnAddonMessage("H:" .. resolveHash .. ":0.40", "Alice")
 -- No sync state should be created since hashes match
 assert_equal(Profesjonell.Frame.lastSyncPeer == nil, true, "FIX6_2: Matching H after soft reset doesn't start new sync")
 
+-- ==========================================
+-- Search Window Tests
+-- ==========================================
+
+-- SW1: GetFilteredRecipes returns all recipes with no filters
+ProfesjonellDB = {
+    ["i:1234"] = { ["Player"] = true, ["Other"] = true },
+    ["s:5678"] = { ["Player"] = true }
+}
+local swNameCache = { ["i:1234"] = "Lionheart Helm", ["s:5678"] = "Arcane Brilliance" }
+Profesjonell.NameCache = swNameCache
+ProfesjonellConfig = { nameCache = swNameCache }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior", ["Other"] = "Mage" }
+Profesjonell.UpdateGuildRosterCache = function() return true end
+Profesjonell.InvalidateProfessionCache()
+
+-- Restore original GetNameFromKey (may have been mocked by earlier tests)
+Profesjonell.GetNameFromKey = nil
+dofile("Modules/Database.lua")
+Profesjonell.NameCache = swNameCache
+ProfesjonellConfig.nameCache = swNameCache
+local sw_results = Profesjonell.GetFilteredRecipes("", nil)
+assert_equal(table.getn(sw_results), 2, "SW1: GetFilteredRecipes returns all recipes with no filter")
+-- Should be sorted alphabetically: Arcane Brilliance before Lionheart Helm
+assert_equal(sw_results[1].name, "Arcane Brilliance", "SW1: Results sorted alphabetically (first)")
+assert_equal(sw_results[2].name, "Lionheart Helm", "SW1: Results sorted alphabetically (second)")
+
+-- SW2: Text filter matches recipe name
+sw_results = Profesjonell.GetFilteredRecipes("lion", nil)
+assert_equal(table.getn(sw_results), 1, "SW2: Text filter matches recipe name")
+assert_equal(sw_results[1].name, "Lionheart Helm", "SW2: Correct recipe matched")
+
+-- SW3: Text filter matches holder name
+sw_results = Profesjonell.GetFilteredRecipes("other", nil)
+assert_equal(table.getn(sw_results), 1, "SW3: Text filter matches holder name")
+assert_equal(sw_results[1].name, "Lionheart Helm", "SW3: Correct recipe matched by holder")
+
+-- SW4: Text filter with multiple words (AND logic)
+sw_results = Profesjonell.GetFilteredRecipes("lion helm", nil)
+assert_equal(table.getn(sw_results), 1, "SW4: Multi-word filter matches")
+sw_results = Profesjonell.GetFilteredRecipes("lion arcane", nil)
+assert_equal(table.getn(sw_results), 0, "SW4: Multi-word filter excludes non-matching")
+
+-- SW5: Text filter is case-insensitive
+sw_results = Profesjonell.GetFilteredRecipes("LIONHEART", nil)
+assert_equal(table.getn(sw_results), 1, "SW5: Case-insensitive filter")
+
+-- SW6: Category filter works via tooltip-scanned cache
+-- Set up tooltip lines: Lionheart Helm has "Head" slot (equipment), Arcane Brilliance has no slot
+TEST_TOOLTIP_LINES["item:1234:0:0:0"] = { "Lionheart Helm", "Head", "Plate" }
+TEST_TOOLTIP_LINES["spell:5678"] = { "Arcane Brilliance" }
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+sw_results = Profesjonell.GetFilteredRecipes("", "equipment")
+assert_equal(table.getn(sw_results), 1, "SW6: Category filter returns matching equipment")
+assert_equal(sw_results[1].name, "Lionheart Helm", "SW6: Correct recipe for equipment")
+
+sw_results = Profesjonell.GetFilteredRecipes("", "other")
+assert_equal(table.getn(sw_results), 1, "SW6b: 'other' filter for uncategorized")
+assert_equal(sw_results[1].name, "Arcane Brilliance", "SW6b: Correct recipe for other")
+
+-- SW7: Combined text + category filter
+sw_results = Profesjonell.GetFilteredRecipes("lion", "equipment")
+assert_equal(table.getn(sw_results), 1, "SW7: Combined filter matches")
+sw_results = Profesjonell.GetFilteredRecipes("lion", "consumable")
+assert_equal(table.getn(sw_results), 0, "SW7b: Combined filter excludes mismatch")
+
+-- SW8: GetRecipeCategory reads from cache after build
+assert_equal(Profesjonell.GetRecipeCategory("i:1234"), "equipment", "SW8: GetRecipeCategory from tooltip cache")
+
+-- SW9: Name-based rules take priority (enchant -> enhancement)
+ProfesjonellDB = {
+    ["s:9999"] = { ["Enc1"] = true },
+    ["i:1234"] = { ["Player"] = true, ["Other"] = true },
+}
+Profesjonell.NameCache["s:9999"] = "Enchant Weapon - Fiery"
+Profesjonell.GuildRosterCache = { ["Enc1"] = true, ["Player"] = true, ["Other"] = true }
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+assert_equal(Profesjonell.GetRecipeCategory("s:9999"), "enhancement", "SW9: Enchant inferred as enhancement")
+
+-- SW10: Holders are sorted alphabetically
+sw_results = Profesjonell.GetFilteredRecipes("lionheart", nil)
+assert_equal(table.getn(sw_results), 1, "SW10: Found recipe")
+assert_equal(sw_results[1].holders[1], "Other", "SW10: Holders sorted (first)")
+assert_equal(sw_results[1].holders[2], "Player", "SW10: Holders sorted (second)")
+
+-- SW11: Unknown recipes are excluded (use a key that can't resolve via GetItemInfo or tooltip)
+ProfesjonellDB["s:9999"] = { ["Player"] = true }
+Profesjonell.NameCache["s:9999"] = "Unknown (s:9999)"
+-- Clear stale tooltip globals to prevent false resolution
+_G["ProfesjonellTooltipTextLeft1"] = nil
+sw_results = Profesjonell.GetFilteredRecipes("", nil)
+local foundUnknown = false
+for _, rr in ipairs(sw_results) do
+    if rr.key == "s:9999" then foundUnknown = true end
+end
+assert_equal(foundUnknown, false, "SW11: Unknown recipes excluded from results")
+ProfesjonellDB["s:9999"] = nil
+Profesjonell.NameCache["s:9999"] = nil
+
+-- SW12: Empty database returns empty results
+ProfesjonellDB = {}
+sw_results = Profesjonell.GetFilteredRecipes("", nil)
+assert_equal(table.getn(sw_results), 0, "SW12: Empty DB returns empty results")
+
+-- SW13: ToggleSearchWindow function exists
+assert_equal(type(Profesjonell.ToggleSearchWindow), "function", "SW13: ToggleSearchWindow exists")
+
+-- SW14: GetFilteredRecipes function exists
+assert_equal(type(Profesjonell.GetFilteredRecipes), "function", "SW14: GetFilteredRecipes exists")
+
+-- SW15: Tooltip-based equipment detection via ReadItemTypeFromTooltip
+ProfesjonellDB = {
+    ["i:5555"] = { ["Crafter1"] = true },
+    ["i:5556"] = { ["Crafter1"] = true },
+}
+Profesjonell.NameCache["i:5555"] = "Arcanite Reaper"
+Profesjonell.NameCache["i:5556"] = "Major Healing Potion"
+Profesjonell.GuildRosterCache = { ["Crafter1"] = true }
+TEST_TOOLTIP_LINES["item:5555:0:0:0"] = { "Arcanite Reaper", "Two-Hand", "Axe" }
+TEST_TOOLTIP_LINES["item:5556:0:0:0"] = { "Major Healing Potion", "Use: Restores 1050 health." }
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+assert_equal(Profesjonell.GetRecipeCategory("i:5555"), "equipment", "SW15: Equipment detected from tooltip slot")
+assert_equal(Profesjonell.GetRecipeCategory("i:5556"), "consumable", "SW15b: Consumable detected from tooltip Use:")
+
+-- SW16: Name-based inference for Item Enhancement via rules table
+ProfesjonellDB = { ["s:9999"] = { ["Enc1"] = true } }
+Profesjonell.NameCache["s:9999"] = "Enchant Weapon - Fiery"
+Profesjonell.GuildRosterCache = { ["Enc1"] = true }
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+assert_equal(Profesjonell.GetRecipeCategory("s:9999"), "enhancement", "SW16: 'Enchant Weapon' rule infers enhancement")
+
+-- SW16b: Oil rules
+ProfesjonellDB["s:9998"] = { ["Enc1"] = true }
+Profesjonell.NameCache["s:9998"] = "Brilliant Mana Oil"
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+assert_equal(Profesjonell.GetRecipeCategory("s:9998"), "consumable", "SW16b: 'Mana Oil' suffix infers consumable")
+
+-- SW17: InferCategoryFromName rules
+assert_equal(Profesjonell.InferCategoryFromName("Enchant Boots - Minor Speed"), "enhancement", "SW17: Enchant -> enhancement")
+assert_equal(Profesjonell.InferCategoryFromName("Brilliant Wizard Oil"), "consumable", "SW17b: Wizard Oil -> consumable")
+assert_equal(Profesjonell.InferCategoryFromName("Dense Sharpening Stone"), "consumable", "SW17c: Sharpening Stone -> consumable")
+assert_equal(Profesjonell.InferCategoryFromName("Frost Oil"), "consumable", "SW17d: Frost Oil -> consumable")
+assert_equal(Profesjonell.InferCategoryFromName("Shadow Oil"), "consumable", "SW17e: Shadow Oil -> consumable")
+assert_equal(Profesjonell.InferCategoryFromName("Elixir of the Mongoose"), "consumable", "SW17f: Elixir of -> consumable")
+assert_equal(Profesjonell.InferCategoryFromName("Flask of the Titans"), "consumable", "SW17g: Flask of -> consumable")
+assert_equal(Profesjonell.InferCategoryFromName("Major Mana Potion"), "consumable", "SW17h: Potion -> consumable")
+assert_equal(Profesjonell.InferCategoryFromName("Iron Grenade"), nil, "SW17i: No match returns nil")
+
+-- SW18: "Other" category filter matches recipes with no category
+ProfesjonellDB = {
+    ["s:8888"] = { ["Enc1"] = true },
+    ["i:7777"] = { ["Crafter1"] = true },
+}
+Profesjonell.NameCache["s:8888"] = "Enchant Gloves - Mining"
+Profesjonell.NameCache["i:7777"] = "Some Unknown Craft"
+Profesjonell.GuildRosterCache = { ["Enc1"] = true, ["Crafter1"] = true }
+TEST_TOOLTIP_LINES["item:7777:0:0:0"] = { "Some Unknown Craft" }
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+local otherResults = Profesjonell.GetFilteredRecipes("", "other")
+assert_equal(table.getn(otherResults), 1, "SW18: 'other' filter returns only unclassified recipes")
+assert_equal(otherResults[1].name, "Some Unknown Craft", "SW18: 'other' filter correct recipe")
+
+-- SW19: "Gun" detected as equipment from tooltip
+ProfesjonellDB = { ["i:6666"] = { ["Hunter1"] = true } }
+Profesjonell.NameCache["i:6666"] = "Thorium Rifle"
+Profesjonell.GuildRosterCache = { ["Hunter1"] = true }
+TEST_TOOLTIP_LINES["item:6666:0:0:0"] = { "Thorium Rifle", "Gun", "Speed 2.90" }
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+assert_equal(Profesjonell.GetRecipeCategory("i:6666"), "equipment", "SW19: 'Gun' slot detected as equipment")
+-- SW19b: Other weapon subtypes detected as equipment
+ProfesjonellDB["i:6667"] = { ["Hunter1"] = true }
+Profesjonell.NameCache["i:6667"] = "Arcanite Dragonling Bow"
+TEST_TOOLTIP_LINES["item:6667:0:0:0"] = { "Arcanite Dragonling Bow", "Bow", "Speed 2.70" }
+ProfesjonellDB["i:6668"] = { ["Hunter1"] = true }
+Profesjonell.NameCache["i:6668"] = "Dwarven Hand Cannon"
+TEST_TOOLTIP_LINES["item:6668:0:0:0"] = { "Dwarven Hand Cannon", "Crossbow", "Speed 3.20" }
+ProfesjonellDB["i:6669"] = { ["Hunter1"] = true }
+Profesjonell.NameCache["i:6669"] = "Ritual Kris"
+TEST_TOOLTIP_LINES["item:6669:0:0:0"] = { "Ritual Kris", "Wand", "Speed 1.50" }
+ProfesjonellDB["i:6670"] = { ["Hunter1"] = true }
+Profesjonell.NameCache["i:6670"] = "Thorium Shield Spike"
+TEST_TOOLTIP_LINES["item:6670:0:0:0"] = { "Thorium Shield Spike" }
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+assert_equal(Profesjonell.GetRecipeCategory("i:6667"), "equipment", "SW19b: 'Bow' slot detected as equipment")
+assert_equal(Profesjonell.GetRecipeCategory("i:6668"), "equipment", "SW19c: 'Crossbow' slot detected as equipment")
+assert_equal(Profesjonell.GetRecipeCategory("i:6669"), "equipment", "SW19d: 'Wand' slot detected as equipment")
+assert_equal(Profesjonell.GetRecipeCategory("i:6670"), "enhancement", "SW19e: 'Thorium Shield Spike' inferred as enhancement by name")
+-- SW20: Enhancement items get enchanting icon only for spell keys, not item keys
+assert_equal(Profesjonell.InferCategoryFromName("Enchant Chest - Stats"), "enhancement", "SW20: Enchant inferred as enhancement")
+-- Verify that enhancement recipes include category in filtered results
+ProfesjonellDB = {
+    ["s:7000"] = { ["Enc1"] = true },
+    ["i:6670"] = { ["Crafter1"] = true },
+}
+Profesjonell.NameCache["s:7000"] = "Enchant Weapon - Crusader"
+Profesjonell.NameCache["i:6670"] = "Thorium Shield Spike"
+Profesjonell.GuildRosterCache = { ["Enc1"] = true, ["Crafter1"] = true }
+TEST_TOOLTIP_LINES["item:6670:0:0:0"] = { "Thorium Shield Spike" }
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+local enchResults = Profesjonell.GetFilteredRecipes("", "enhancement")
+assert_equal(table.getn(enchResults), 2, "SW20b: Enhancement filter returns both spell and item enhancements")
+-- Verify spell enhancement has category for tooltip skip
+local spellEnch, itemEnch
+for _, r in ipairs(enchResults) do
+    if r.key == "s:7000" then spellEnch = r end
+    if r.key == "i:6670" then itemEnch = r end
+end
+assert_equal(spellEnch.category, "enhancement", "SW20c: Spell enhancement has enhancement category")
+assert_equal(itemEnch.category, "enhancement", "SW20d: Item enhancement has enhancement category")
 -- Summary
 print(string.format("\nTests complete: %d passed, %d failed", passed, failed))
 if failed > 0 then

@@ -25,6 +25,13 @@ function Profesjonell.ScanRecipes(isCraft)
         getRecipeLink = GetTradeSkillRecipeLink or function() return nil end
     end
 
+    -- Store profession name for recipe→profession mapping
+    local profName = isCraft and (GetCraftDisplayName and GetCraftDisplayName()) or (GetTradeSkillLine and GetTradeSkillLine())
+    if profName then
+        if not ProfesjonellConfig then ProfesjonellConfig = {} end
+        ProfesjonellConfig.recipeProfessions = ProfesjonellConfig.recipeProfessions or {}
+    end
+
     local playerName = Profesjonell.GetPlayerName()
     local newCount = 0
     local newKeys = {}
@@ -51,6 +58,11 @@ function Profesjonell.ScanRecipes(isCraft)
                     if not next(ProfesjonellDB[name]) then ProfesjonellDB[name] = nil end
                 end
                 
+                -- Store recipe→profession mapping
+                if profName and ProfesjonellConfig.recipeProfessions then
+                    ProfesjonellConfig.recipeProfessions[key] = profName
+                end
+
                 if not ProfesjonellDB[key] then
                     ProfesjonellDB[key] = {}
                 end

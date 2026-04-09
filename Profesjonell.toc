@@ -2,7 +2,7 @@
 ## Title: Profesjonell
 ## Notes: Gathers all the recipes a character has and syncs it between guild members.
 ## Author: Hjelp+Junie
-## Version: 0.501
+## Version: 0.502
 ## SavedVariables: ProfesjonellDB, ProfesjonellConfig
 
 Modules\Init.lua
@@ -14,4 +14,5 @@ Modules\Professions.lua
 Modules\Scanner.lua
 Modules\Comm.lua
 Modules\UI.lua
+Modules\SearchWindow.lua
 Profesjonell.lua

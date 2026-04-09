@@ -650,6 +650,14 @@ SlashCmdList["PROFESJONELL"] = function(msg)
         return
     end
 
+    -- No arguments: open search window
+    if msg == "" or msg == nil then
+        if Profesjonell.ToggleSearchWindow then
+            Profesjonell.ToggleSearchWindow()
+        end
+        return
+    end
+
     Profesjonell.Print("Commands:")
     Profesjonell.Print("/prof [recipe] - Search for a recipe holder.")
     Profesjonell.Print("/prof sync - Synchronize database with guild.")
