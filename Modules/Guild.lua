@@ -11,6 +11,7 @@ Profesjonell.GuildRosterCache = {}
 Profesjonell.GuildRosterRankCache = {}
 Profesjonell.LastRosterUpdate = 0
 Profesjonell.LastRosterRequest = 0
+Profesjonell.PendingShowOfflineRestore = nil -- value to restore after GUILD_ROSTER_UPDATE
 
 function Profesjonell.UpdateGuildRosterCache()
     local now = GetTime()
@@ -39,10 +40,18 @@ function Profesjonell.UpdateGuildRosterCache()
         Profesjonell.Debug("Requesting GuildRoster from server (with offline members)")
         GuildRoster()
         Profesjonell.LastRosterRequest = now
+        -- Defer ShowOffline restore until GUILD_ROSTER_UPDATE fires
+        if showOffline ~= 1 then
+            Profesjonell.PendingShowOfflineRestore = showOffline
+        end
     end
 
     -- If we have data and it's somewhat fresh (within 30s), just return true without re-parsing
     if now - Profesjonell.LastRosterUpdate < 30 and next(Profesjonell.GuildRosterCache) then
+        -- Only restore immediately if we didn't just send a GuildRoster() request above
+        if showOffline ~= 1 and not Profesjonell.PendingShowOfflineRestore then
+            SetGuildRosterShowOffline(showOffline)
+        end
         return true
     end
 
@@ -50,7 +59,7 @@ function Profesjonell.UpdateGuildRosterCache()
 
     local num = GetNumGuildMembers()
     if num == 0 then
-        if showOffline ~= 1 then
+        if showOffline ~= 1 and not Profesjonell.PendingShowOfflineRestore then
             SetGuildRosterShowOffline(showOffline)
         end
         return false
@@ -66,12 +75,38 @@ function Profesjonell.UpdateGuildRosterCache()
         end
     end
 
-    if showOffline ~= 1 then
+    if showOffline ~= 1 and not Profesjonell.PendingShowOfflineRestore then
         SetGuildRosterShowOffline(showOffline)
     end
 
     Profesjonell.LastRosterUpdate = now
     return true
+end
+
+-- Called when GUILD_ROSTER_UPDATE fires: rebuild cache with fresh data and restore ShowOffline
+function Profesjonell.OnGuildRosterUpdate()
+    local guildName = Profesjonell.GetGuildName()
+    if not guildName then return end
+
+    local num = GetNumGuildMembers()
+    if num > 0 then
+        Profesjonell.GuildRosterCache = {}
+        Profesjonell.GuildRosterRankCache = {}
+        for i = 1, num do
+            local name, rank, rankIndex, _, class = GetGuildRosterInfo(i)
+            if name then
+                Profesjonell.GuildRosterCache[name] = class
+                Profesjonell.GuildRosterRankCache[name] = { rank = rank, rankIndex = rankIndex }
+            end
+        end
+        Profesjonell.LastRosterUpdate = GetTime()
+    end
+
+    -- Now that we've consumed the roster data, restore the user's ShowOffline preference
+    if Profesjonell.PendingShowOfflineRestore ~= nil then
+        SetGuildRosterShowOffline(Profesjonell.PendingShowOfflineRestore)
+        Profesjonell.PendingShowOfflineRestore = nil
+    end
 end
 
 function Profesjonell.IsInGuild(name)

@@ -27,6 +27,7 @@ frame:RegisterEvent("CHAT_MSG_ADDON")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("CHAT_MSG_GUILD")
 frame:RegisterEvent("PLAYER_GUILD_UPDATE")
+frame:RegisterEvent("GUILD_ROSTER_UPDATE")
 
 frame:SetScript("OnEvent", function()
     -- In WoW 1.12, event, arg1, arg2, etc. are global variables during the execution of OnEvent
@@ -90,6 +91,10 @@ frame:SetScript("OnEvent", function()
     elseif event == "PLAYER_GUILD_UPDATE" then
         if Profesjonell.WipeDatabaseIfGuildChanged then
             Profesjonell.WipeDatabaseIfGuildChanged()
+        end
+    elseif event == "GUILD_ROSTER_UPDATE" then
+        if Profesjonell.OnGuildRosterUpdate then
+            Profesjonell.OnGuildRosterUpdate()
         end
     elseif event == "CHAT_MSG_ADDON" and arg1 == "Profesjonell" then
         if Profesjonell.OnAddonMessage then

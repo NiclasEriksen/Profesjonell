@@ -484,9 +484,16 @@ local function CreateSearchWindow()
     -- Register for Escape to close
     tinsert(UISpecialFrames, "ProfesjonellSearchFrame")
 
+    -- Title icon
+    local titleIcon = f:CreateTexture(nil, "ARTWORK")
+    titleIcon:SetWidth(16)
+    titleIcon:SetHeight(16)
+    titleIcon:SetTexture("Interface\\Icons\\ability_hunter_aspectofthemonkey")
+    titleIcon:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -14)
+
     -- Title
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOP", f, "TOP", 0, -16)
+    title:SetPoint("LEFT", titleIcon, "RIGHT", 5, 0)
     title:SetText("Profesjonell - Guild Recipes")
 
     -- Close button

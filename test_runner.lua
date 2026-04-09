@@ -509,11 +509,73 @@ local found_incomplete, _, _ = Profesjonell.FindRecipeHolders("Test Recipe")
 -- Should still find both players when roster isn't ready (to avoid false "no one knows")
 assert_equal(table.getn(found_incomplete), 2, "FindRecipeHolders includes all DB holders when roster not ready")
 
--- Test: ShowOffline setting enabled when it's 0 (disabled)
--- This test was failing due to Lua truthiness - we fixed the code to check showOffline ~= 1 instead of not showOffline
--- Skipping this test as the fix is verified by code review and the core functionality works
--- The test infrastructure doesn't properly isolate GetTime() between tests
--- assert_equal(true, true, "ShowOffline fix verified (test skipped due to isolation issues)")
+-- Test: ShowOffline state is restored on all early return paths
+do
+    -- Save originals
+    local origGetTime = GetTime
+    local origGetGuildName = Profesjonell.GetGuildName
+    local origGetNumGuildMembers = GetNumGuildMembers
+    local origGetGuildRosterInfo = GetGuildRosterInfo
+    local origGuildRoster = GuildRoster
+    local origGetGuildRosterShowOffline = GetGuildRosterShowOffline
+    local origSetGuildRosterShowOffline = SetGuildRosterShowOffline
+    local origUpdateGuildRosterCache = Profesjonell.UpdateGuildRosterCache
+
+    local testTime = 5000
+    GetTime = function() return testTime end
+    Profesjonell.GetGuildName = function() return "TestGuild" end
+    GetNumGuildMembers = function() return 2 end
+    GetGuildRosterInfo = function(i)
+        if i == 1 then return "Player", "Member", 2, nil, "Warrior" end
+        if i == 2 then return "Other", "Officer", 1, nil, "Mage" end
+        return nil
+    end
+    GuildRoster = function() end
+
+    local showOfflineState = 0 -- User has show-offline DISABLED
+    GetGuildRosterShowOffline = function() return showOfflineState end
+    local lastSetValue = nil
+    SetGuildRosterShowOffline = function(val) showOfflineState = val; lastSetValue = val end
+
+    -- Reload Guild.lua to use our mocks
+    Profesjonell.LastRosterUpdate = 0
+    Profesjonell.LastRosterRequest = 0
+    Profesjonell.GuildRosterCache = {}
+    dofile("Modules/Guild.lua")
+
+    -- First call: full rebuild + GuildRoster() request (LastRosterRequest is 0)
+    -- ShowOffline should NOT be restored immediately — deferred to OnGuildRosterUpdate
+    showOfflineState = 0
+    lastSetValue = nil
+    Profesjonell.LastRosterUpdate = 0
+    Profesjonell.PendingShowOfflineRestore = nil
+    Profesjonell.UpdateGuildRosterCache()
+    assert_equal(showOfflineState, 1, "ShowOffline stays enabled while waiting for GUILD_ROSTER_UPDATE")
+    assert_equal(Profesjonell.PendingShowOfflineRestore, 0, "PendingShowOfflineRestore is set to original value")
+
+    -- Simulate GUILD_ROSTER_UPDATE arriving: should rebuild cache and restore ShowOffline
+    Profesjonell.OnGuildRosterUpdate()
+    assert_equal(showOfflineState, 0, "ShowOffline restored after OnGuildRosterUpdate")
+    assert_equal(Profesjonell.PendingShowOfflineRestore, nil, "PendingShowOfflineRestore cleared after restore")
+
+    -- Second call within 30s (but after 5s): hits the 30s-cache early return
+    -- No new GuildRoster() request (throttled to 60s), so restore is immediate
+    testTime = testTime + 10 -- 10s later, within 30s window but past 5s
+    showOfflineState = 0 -- User still has it disabled
+    lastSetValue = nil
+    Profesjonell.UpdateGuildRosterCache()
+    assert_equal(showOfflineState, 0, "ShowOffline restored on 30s-cache early return path (no pending async)")
+
+    -- Restore originals
+    GetTime = origGetTime
+    Profesjonell.GetGuildName = origGetGuildName
+    GetNumGuildMembers = origGetNumGuildMembers
+    GetGuildRosterInfo = origGetGuildRosterInfo
+    GuildRoster = origGuildRoster
+    GetGuildRosterShowOffline = origGetGuildRosterShowOffline
+    SetGuildRosterShowOffline = origSetGuildRosterShowOffline
+    Profesjonell.UpdateGuildRosterCache = origUpdateGuildRosterCache
+end
 
 -- Test: Delay for "no results" responses
 local currentTime = 2000
@@ -1419,8 +1481,9 @@ Profesjonell.OnAddonMessage("B:Other:i:99", "Alice")
 assert_equal(Profesjonell.PendingActions.syncTimer ~= nil, true, "FIX5_1: Sync timer still active after B receive")
 assert_equal(Profesjonell.PendingActions.syncTimer > timerBefore, true, "FIX5_1: Sync timer extended after B with new data")
 
--- FIX6_1: Graceful retry exhaustion - broadcastHash is scheduled, not a hard stop
+-- FIX6_1: Graceful retry exhaustion - broadcastHash is scheduled with escalating backoff
 resetSyncState()
+Profesjonell.ExhaustedPeers = {}
 ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
 Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
 Profesjonell.CachedDatabaseHash = nil
@@ -1431,13 +1494,36 @@ Profesjonell.PendingActions.syncTimer = GetTime() - 1
 Profesjonell.Frame.syncTimer = Profesjonell.PendingActions.syncTimer
 Profesjonell.OnCommUpdate()
 assert_equal(Profesjonell.PendingActions.broadcastHash ~= nil, true, "FIX6_1: Soft reset schedules fresh H broadcast")
--- The delay should be 30-60s from now
+-- First exhaustion: 5 min (300s) + up to 30s random
 local bcastDelay = Profesjonell.PendingActions.broadcastHash - GetTime()
-assert_equal(bcastDelay >= 30, true, "FIX6_1: Fresh H broadcast delay >= 30s")
-assert_equal(bcastDelay <= 61, true, "FIX6_1: Fresh H broadcast delay <= ~60s")
+assert_equal(bcastDelay >= 300, true, "FIX6_1: Fresh H broadcast delay >= 300s (5 min backoff)")
+assert_equal(bcastDelay <= 331, true, "FIX6_1: Fresh H broadcast delay <= ~330s")
+assert_equal(Profesjonell.ExhaustedPeers["Alice"] ~= nil, true, "FIX6_1: Peer marked as exhausted")
+assert_equal(Profesjonell.ExhaustedPeers["Alice"].count, 1, "FIX6_1: Exhaustion count is 1")
+
+-- FIX6_1b: Exhaustion cooldown blocks re-sync with same peer on H mismatch
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+-- Alice is still in exhaustion cooldown from FIX6_1
+Profesjonell.OnAddonMessage("H:differenthash:0.40", "Alice")
+assert_equal(Profesjonell.Frame.lastSyncPeer == nil, true, "FIX6_1b: Exhausted peer H mismatch is ignored during cooldown")
+
+-- FIX6_1c: Cooldown clears when hashes match
+resetSyncState()
+ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
+Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
+Profesjonell.CachedDatabaseHash = nil
+Profesjonell.RemoteVersions["Alice"] = "0.40"
+local matchHash = Profesjonell.GenerateDatabaseHash()
+Profesjonell.OnAddonMessage("H:" .. matchHash .. ":0.40", "Alice")
+assert_equal(Profesjonell.ExhaustedPeers["Alice"] == nil, true, "FIX6_1c: Exhaustion cleared when hashes match")
 
 -- FIX6_2: After soft reset, if hashes truly match, the H exchange resolves cleanly
 resetSyncState()
+Profesjonell.ExhaustedPeers = {}
 ProfesjonellDB = { ["i:1"] = { ["Player"] = true } }
 Profesjonell.GuildRosterCache = { ["Player"] = "Warrior" }
 Profesjonell.CachedDatabaseHash = nil

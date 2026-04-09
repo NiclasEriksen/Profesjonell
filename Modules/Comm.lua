@@ -19,6 +19,10 @@ Profesjonell.LastHBroadcastTime = 0 -- Minimum interval tracking for H broadcast
 Profesjonell.YieldedBTo = {} -- charName -> sender we yielded to
 Profesjonell.BPriority = {} -- charName -> true if our next B should not be cancelled
 
+-- Per-peer sync exhaustion cooldown: ExhaustedPeers[sender] = {time=GetTime(), count=N}
+-- After exhausting retries with a peer, we back off with increasing delays.
+Profesjonell.ExhaustedPeers = {}
+
 -- C: message accumulation buffer (per-sender)
 -- Structure: IncomingCBuffer[sender] = { chars = {name=hash,...}, lastReceived=time, settleTime=time }
 Profesjonell.IncomingCBuffer = {}
@@ -391,13 +395,21 @@ function Profesjonell.OnCommUpdate()
             local currentHash = Profesjonell.GenerateDatabaseHash()
             if currentHash ~= frame.lastRemoteHash then
                 if frame.syncRetryCount and frame.syncRetryCount >= 3 then
-                    Profesjonell.Debug("Sync retries exhausted for " .. frame.lastSyncPeer .. ". Soft reset: scheduling fresh H broadcast.")
                     local peer = frame.lastSyncPeer
+                    -- Track exhaustion for this peer with escalating backoff
+                    local exhaustInfo = Profesjonell.ExhaustedPeers[peer] or {time = 0, count = 0}
+                    exhaustInfo.count = exhaustInfo.count + 1
+                    exhaustInfo.time = GetTime()
+                    Profesjonell.ExhaustedPeers[peer] = exhaustInfo
+                    -- Backoff: 5 min, 10 min, 15 min, ... capped at 15 min
+                    local cooldownMinutes = math.min(exhaustInfo.count * 5, 15)
+                    Profesjonell.Debug("Sync retries exhausted for " .. peer .. " (" .. exhaustInfo.count .. " time(s)). Backing off for " .. cooldownMinutes .. " min.")
                     ClearSyncState()
-                    -- Schedule a fresh H broadcast after a delay so a clean sync cycle can start
-                    pending.broadcastHash = GetTime() + 30 + math.random() * 30
+                    -- Schedule a fresh H broadcast after the cooldown so a clean sync cycle can eventually start
+                    local cooldownSec = cooldownMinutes * 60 + math.random() * 30
+                    pending.broadcastHash = GetTime() + cooldownSec
                     frame.broadcastHashTime = pending.broadcastHash
-                    Profesjonell.Debug("Fresh H broadcast scheduled in ~" .. string.format("%.0f", pending.broadcastHash - GetTime()) .. "s for " .. peer)
+                    Profesjonell.Debug("Fresh H broadcast scheduled in ~" .. string.format("%.0f", cooldownSec) .. "s for " .. peer)
                     return
                 end
 
@@ -780,6 +792,21 @@ function Profesjonell.OnAddonMessage(message, sender)
                     return
                 end
 
+                -- Skip sync with peers we recently exhausted retries for
+                local exhaustInfo = Profesjonell.ExhaustedPeers[sender]
+                if exhaustInfo then
+                    local cooldownMinutes = math.min(exhaustInfo.count * 5, 15)
+                    local elapsed = GetTime() - exhaustInfo.time
+                    if elapsed < cooldownMinutes * 60 then
+                        local remaining = math.ceil((cooldownMinutes * 60 - elapsed) / 60)
+                        Profesjonell.Debug("Ignoring hash mismatch with " .. sender .. ": sync exhaustion cooldown (" .. remaining .. " min remaining).")
+                        return
+                    else
+                        -- Cooldown expired, allow sync again
+                        Profesjonell.ExhaustedPeers[sender] = nil
+                    end
+                end
+
                 -- If we are already mid-sync with a different peer, queue this one
                 if Profesjonell.PendingActions.syncTimer and Profesjonell.Frame.lastSyncPeer
                    and Profesjonell.Frame.lastSyncPeer ~= sender then
@@ -820,6 +847,8 @@ function Profesjonell.OnAddonMessage(message, sender)
                     SetSyncTimer(GetTime() + delay)
                 end
             else
+                -- Hashes match: always clear exhaustion state for this peer
+                Profesjonell.ExhaustedPeers[sender] = nil
                 if Profesjonell.Frame.syncTimer or Profesjonell.Frame.lastRemoteHash == remoteHash then
                     Profesjonell.Debug("Hashes match, cancelling pending sync.")
                     ClearSyncState()
