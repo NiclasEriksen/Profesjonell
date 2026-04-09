@@ -68,6 +68,9 @@ frame:SetScript("OnEvent", function()
         if Profesjonell.AttachGuildMemberProfessionInfo then
             Profesjonell.AttachGuildMemberProfessionInfo()
         end
+        if Profesjonell.CreateMinimapButton then
+            Profesjonell.CreateMinimapButton()
+        end
     elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" then
         if Profesjonell.ScanRecipes then
             Profesjonell.ScanRecipes(false)
