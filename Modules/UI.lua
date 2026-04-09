@@ -453,6 +453,36 @@ SlashCmdList["PROFESJONELL"] = function(msg)
         return
     end
 
+    if msg == "debuglog" then
+        ProfesjonellConfig.debugLog = not ProfesjonellConfig.debugLog
+        Profesjonell.Print("Debug logging: " .. (ProfesjonellConfig.debugLog and "|cff00ff00Enabled|r" or "|cffff0000Disabled|r"))
+        if ProfesjonellConfig.debugLog then
+            Profesjonell.Print("Use |cff66bbff/prof log|r to open the debug log viewer.")
+        end
+        return
+    end
+
+    if msg == "log" then
+        if Profesjonell.ToggleDebugLogWindow then
+            Profesjonell.ToggleDebugLogWindow()
+        end
+        return
+    end
+
+    if msg == "log copy" or msg == "debuglog copy" then
+        if Profesjonell.ExportDebugLog then
+            Profesjonell.ExportDebugLog()
+        end
+        return
+    end
+
+    if msg == "log clear" or msg == "debuglog clear" then
+        if Profesjonell.ClearDebugLog then
+            Profesjonell.ClearDebugLog()
+        end
+        return
+    end
+
     if msg == "sync" then
         local now = GetTime()
         if not Profesjonell.LastSyncRequest or (now - Profesjonell.LastSyncRequest > 30) then
@@ -662,7 +692,11 @@ SlashCmdList["PROFESJONELL"] = function(msg)
     Profesjonell.Print("/prof [recipe] - Search for a recipe holder.")
     Profesjonell.Print("/prof sync - Synchronize database with guild.")
     Profesjonell.Print("/prof share - Share your recipes with the guild.")
-    Profesjonell.Print("/prof debug - Toggle debug messages.")
+    Profesjonell.Print("/prof debug - Toggle debug messages in chat.")
+    Profesjonell.Print("/prof debuglog - Toggle persistent debug logging.")
+    Profesjonell.Print("/prof log - Open/close the debug log viewer.")
+    Profesjonell.Print("/prof log copy - Export log for copy/paste.")
+    Profesjonell.Print("/prof log clear - Clear the debug log.")
     Profesjonell.Print("/prof add [name] [recipe] - Add recipe to character (Officer only).")
     Profesjonell.Print("/prof remove [name] [recipe] - Remove recipe from character (Officer only).")
     Profesjonell.Print("/prof purge - Clean up database (Officer only).")

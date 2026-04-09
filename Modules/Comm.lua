@@ -758,6 +758,7 @@ function Profesjonell.OnAddonMessage(message, sender)
         end
 
         Profesjonell.RemoteVersions[sender] = remoteVersion
+        Profesjonell.Debug("Received H from " .. sender .. " (v" .. remoteVersion .. ") hash=" .. remoteHash)
 
         local localHash = Profesjonell.GenerateDatabaseHash()
         if localHash and localHash == remoteHash then

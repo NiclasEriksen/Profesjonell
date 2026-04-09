@@ -170,6 +170,7 @@ local modules = {
     "Modules/Professions.lua",
     "Modules/Scanner.lua",
     "Modules/Comm.lua",
+    "Modules/DebugLog.lua",
     "Modules/UI.lua",
     "Modules/SearchWindow.lua"
 }
@@ -186,6 +187,43 @@ for _, mod in ipairs(modules) do
 end
 
 print("\nRunning tests...")
+
+-- Test DebugLog
+ProfesjonellConfig.debugLog = true
+ProfesjonellDebugLog = {}
+Profesjonell.DebugLogAdd("Test message", "INFO")
+assert_equal(table.getn(ProfesjonellDebugLog), 1, "DebugLogAdd adds entry")
+assert_equal(ProfesjonellDebugLog[1].cat, "INFO", "DebugLogAdd sets category")
+assert_equal(ProfesjonellDebugLog[1].msg, "Test message", "DebugLogAdd sets message")
+
+-- Test Debug hook captures to log
+ProfesjonellDebugLog = {}
+Profesjonell.Debug("Hash mismatch with TestPlayer")
+assert_equal(table.getn(ProfesjonellDebugLog), 1, "Debug hook captures to log")
+assert_equal(ProfesjonellDebugLog[1].cat, "SYNC", "Debug hook auto-categorizes SYNC")
+
+ProfesjonellDebugLog = {}
+Profesjonell.Debug("Sending B: batch")
+assert_equal(ProfesjonellDebugLog[1].cat, "SEND", "Debug hook auto-categorizes SEND")
+
+ProfesjonellDebugLog = {}
+Profesjonell.Debug("Ignoring incompatible version")
+assert_equal(ProfesjonellDebugLog[1].cat, "WARN", "Debug hook auto-categorizes WARN")
+
+ProfesjonellDebugLog = {}
+Profesjonell.Debug("Received C: from TestPlayer")
+assert_equal(ProfesjonellDebugLog[1].cat, "RECV", "Debug hook auto-categorizes RECV")
+
+-- Test ClearDebugLog
+Profesjonell.ClearDebugLog()
+assert_equal(table.getn(ProfesjonellDebugLog), 0, "ClearDebugLog empties log")
+
+-- Test log disabled
+ProfesjonellConfig.debugLog = false
+ProfesjonellDebugLog = {}
+Profesjonell.Debug("Should not be logged")
+assert_equal(table.getn(ProfesjonellDebugLog), 0, "Debug does not log when debugLog is false")
+ProfesjonellConfig.debugLog = true
 
 -- Test Utils
 assert_equal(Profesjonell.StripPrefix("Recipe: Lionheart Helm"), "Lionheart Helm", "StripPrefix handles 'Recipe:'")
