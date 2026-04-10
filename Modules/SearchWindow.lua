@@ -671,15 +671,27 @@ local function CreateSearchWindow()
 
         row.recipeData = nil
 
-        -- Tooltip on hover (skip spell keys to avoid "Unknown link type" errors)
+        -- Tooltip on hover (use enchant: for spell keys to show crafting tooltip)
         row:SetScript("OnEnter", function()
             local data = row.recipeData
-            if data and data.link and not string.find(data.key, "^s:") then
-                local _, _, linkType, linkId = string.find(data.link, "|H(%a+):(%d+)")
+            if data and data.key then
+                local _, _, linkType, linkId = string.find(data.key, "([^:]+):(%d+)")
                 if linkType and linkId then
+                    local hyperlink
+                    if linkType == "s" then
+                        hyperlink = "enchant:" .. linkId
+                    elseif linkType == "i" then
+                        hyperlink = "item:" .. linkId .. ":0:0:0"
+                    else
+                        hyperlink = linkType .. ":" .. linkId
+                    end
                     GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
-                    GameTooltip:SetHyperlink(linkType .. ":" .. linkId)
-                    GameTooltip:Show()
+                    local ok = pcall(function()
+                        GameTooltip:SetHyperlink(hyperlink)
+                    end)
+                    if ok then
+                        GameTooltip:Show()
+                    end
                 end
             end
         end)
@@ -1043,7 +1055,19 @@ function Profesjonell.ShowRecipeDetail(recipeData)
     tooltip:SetPoint("TOPLEFT", df.tooltipArea, "TOPLEFT", 0, 0)
 
     local hasTooltip = false
-    if not string.find(recipeData.key, "^s:") then
+    if string.find(recipeData.key, "^s:") then
+        -- Use enchant: hyperlink for spell keys (shows full crafting tooltip with reagents)
+        local _, _, linkId = string.find(recipeData.key, "^s:(%d+)")
+        if linkId then
+            local ok = pcall(function()
+                tooltip:SetHyperlink("enchant:" .. linkId)
+            end)
+            if ok and tooltip:NumLines() and tooltip:NumLines() > 0 then
+                hasTooltip = true
+                tooltip:Show()
+            end
+        end
+    else
         local _, _, linkType, linkId = string.find(recipeData.link or "", "|H(%a+):(%d+)")
         if linkType and linkId then
             local ok = pcall(function()

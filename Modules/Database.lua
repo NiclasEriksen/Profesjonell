@@ -592,7 +592,7 @@ function Profesjonell.GetLinkFromKey(key)
         -- Vanilla 1.12 uses 3 segments: item:id:enchant:suffix:unique
         return "|cffffffff|Hitem:" .. id .. ":0:0:0|h[" .. name .. "]|h|r"
     elseif fType == "spell" then
-        return "|cff71d5ff|Hspell:" .. id .. "|h[" .. name .. "]|h|r"
+        return "|cff71d5ff|Henchant:" .. id .. "|h[" .. name .. "]|h|r"
     elseif fType == "enchant" then
         return "|cff71d5ff|Henchant:" .. id .. "|h[" .. name .. "]|h|r"
     end
