@@ -144,6 +144,20 @@ function getglobal(name) return name end
 
 GameTooltip = CreateFrame("GameTooltip", "GameTooltip", nil, "GameTooltipTemplate")
 ItemRefTooltip = CreateFrame("GameTooltip", "ItemRefTooltip", nil, "GameTooltipTemplate")
+ChatFrameEditBox = {
+    _visible = false,
+    _text = "",
+    _focused = false,
+    Show = function(self) self._visible = true end,
+    Hide = function(self) self._visible = false end,
+    IsVisible = function(self) return self._visible end,
+    SetText = function(self, text) self._text = text end,
+    GetText = function(self) return self._text end,
+    SetFocus = function(self) self._focused = true end,
+    ClearFocus = function(self) self._focused = false end,
+    Insert = function(self, text) self._text = self._text .. text end,
+}
+RAID_CLASS_COLORS = nil
 
 -- Helper for assertions
 local passed = 0
@@ -1790,6 +1804,61 @@ for _, r in ipairs(enchResults) do
 end
 assert_equal(spellEnch.category, "enhancement", "SW20c: Spell enhancement has enhancement category")
 assert_equal(itemEnch.category, "enhancement", "SW20d: Item enhancement has enhancement category")
+-- SW21: RescanUncategorizedItems resolves previously uncategorized items
+ProfesjonellDB = {
+    ["i:9001"] = { ["Crafter1"] = true },
+    ["i:9002"] = { ["Crafter1"] = true },
+}
+Profesjonell.NameCache["i:9001"] = "Iron Breastplate"
+Profesjonell.NameCache["i:9002"] = "Mystery Item"
+Profesjonell.GuildRosterCache = { ["Crafter1"] = true }
+-- Initially no tooltip data for 9001, so it stays uncategorized
+TEST_TOOLTIP_LINES["item:9001:0:0:0"] = {}
+TEST_TOOLTIP_LINES["item:9002:0:0:0"] = {}
+Profesjonell.InvalidateItemTypeCache()
+Profesjonell.BuildItemTypeCache(nil, nil)
+assert_equal(Profesjonell.GetRecipeCategory("i:9001"), nil, "SW21: Item uncategorized when tooltip empty")
+
+-- Now tooltip data becomes available (simulating game cache load)
+TEST_TOOLTIP_LINES["item:9001:0:0:0"] = { "Iron Breastplate", "Chest", "Plate" }
+TEST_TOOLTIP_LINES["item:9002:0:0:0"] = { "Mystery Item", "Use: Does something." }
+local changed = Profesjonell.RescanUncategorizedItems()
+assert_equal(changed, true, "SW21b: RescanUncategorizedItems returns true when items resolved")
+assert_equal(Profesjonell.GetRecipeCategory("i:9001"), "equipment", "SW21c: Rescan resolved equipment category")
+assert_equal(Profesjonell.GetRecipeCategory("i:9002"), "consumable", "SW21d: Rescan resolved consumable category")
+
+-- Second rescan should find nothing new
+local changed2 = Profesjonell.RescanUncategorizedItems()
+assert_equal(changed2, false, "SW21e: RescanUncategorizedItems returns false when nothing new")
+
+-- SW22: RescanUncategorizedItems uses name rules too
+ProfesjonellDB = { ["s:9003"] = { ["Enc1"] = true } }
+Profesjonell.NameCache["s:9003"] = "Enchant Boots - Speed"
+Profesjonell.GuildRosterCache = { ["Enc1"] = true }
+Profesjonell.InvalidateItemTypeCache()
+-- Don't call BuildItemTypeCache, simulate a partial cache state
+-- Manually mark cache as ready with missing entries
+Profesjonell.BuildItemTypeCache(nil, nil)
+-- The name rule should have caught it during BuildItemTypeCache
+assert_equal(Profesjonell.GetRecipeCategory("s:9003"), "enhancement", "SW22: Name rules applied during build")
+
+-- SW23: GuildRosterOnlineCache exists and is a table
+assert_equal(type(Profesjonell.GuildRosterOnlineCache), "table", "SW23: GuildRosterOnlineCache exists")
+
+-- SW24: ShowRecipeDetail function exists
+assert_equal(type(Profesjonell.ShowRecipeDetail), "function", "SW24: ShowRecipeDetail function exists")
+
+-- SW25: HideRecipeDetail function exists
+assert_equal(type(Profesjonell.HideRecipeDetail), "function", "SW25: HideRecipeDetail function exists")
+
+-- SW26: RescanUncategorizedItems function exists
+assert_equal(type(Profesjonell.RescanUncategorizedItems), "function", "SW26: RescanUncategorizedItems function exists")
+
+-- SW27: RescanUncategorizedItems returns false when cache not ready
+Profesjonell.InvalidateItemTypeCache()
+local noRescan = Profesjonell.RescanUncategorizedItems()
+assert_equal(noRescan, false, "SW27: RescanUncategorizedItems returns false when cache not ready")
+
 -- Summary
 print(string.format("\nTests complete: %d passed, %d failed", passed, failed))
 if failed > 0 then

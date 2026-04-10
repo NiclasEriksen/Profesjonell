@@ -101,7 +101,7 @@ function Profesjonell.GetClassColor(className)
         for class, color in pairs(RAID_CLASS_COLORS) do
             local localized = getglobal(class)
             if localized then
-                classColors[localized] = string.format("%02x%02x%02x", color.r*255, color.g*255, color.b*255)
+                classColors[localized] = string.format("%02x%02x%02x", math.floor(color.r*255 + 0.5), math.floor(color.g*255 + 0.5), math.floor(color.b*255 + 0.5))
             end
         end
         -- Fallback for common English names if localized globals aren't what we expect

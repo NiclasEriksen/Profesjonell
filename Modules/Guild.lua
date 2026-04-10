@@ -9,6 +9,7 @@ end
 
 Profesjonell.GuildRosterCache = {}
 Profesjonell.GuildRosterRankCache = {}
+Profesjonell.GuildRosterOnlineCache = {}
 Profesjonell.LastRosterUpdate = 0
 Profesjonell.LastRosterRequest = 0
 Profesjonell.PendingShowOfflineRestore = nil -- value to restore after GUILD_ROSTER_UPDATE
@@ -73,11 +74,13 @@ function Profesjonell.UpdateGuildRosterCache()
 
     Profesjonell.GuildRosterCache = {}
     Profesjonell.GuildRosterRankCache = {}
+    Profesjonell.GuildRosterOnlineCache = {}
     for i = 1, num do
-        local name, rank, rankIndex, _, class = GetGuildRosterInfo(i)
+        local name, rank, rankIndex, _, class, _, _, _, online = GetGuildRosterInfo(i)
         if name then
             Profesjonell.GuildRosterCache[name] = class
             Profesjonell.GuildRosterRankCache[name] = { rank = rank, rankIndex = rankIndex }
+            Profesjonell.GuildRosterOnlineCache[name] = (online == 1) or (online == true)
         end
     end
 
@@ -106,11 +109,13 @@ function Profesjonell.OnGuildRosterUpdate()
         if num > 0 then
             Profesjonell.GuildRosterCache = {}
             Profesjonell.GuildRosterRankCache = {}
+            Profesjonell.GuildRosterOnlineCache = {}
             for i = 1, num do
-                local name, rank, rankIndex, _, class = GetGuildRosterInfo(i)
+                local name, rank, rankIndex, _, class, _, _, _, online = GetGuildRosterInfo(i)
                 if name then
                     Profesjonell.GuildRosterCache[name] = class
                     Profesjonell.GuildRosterRankCache[name] = { rank = rank, rankIndex = rankIndex }
+                    Profesjonell.GuildRosterOnlineCache[name] = (online == 1) or (online == true)
                 end
             end
             Profesjonell.LastRosterUpdate = GetTime()

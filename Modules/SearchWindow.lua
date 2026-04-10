@@ -104,6 +104,8 @@ end
 local itemTypeCache = {}  -- key -> category
 local itemTypeCacheReady = false
 local itemTypeCacheScanning = false
+local itemTypeRescanTime = 0  -- next time to re-scan uncategorized items
+local RESCAN_INTERVAL = 2     -- seconds between re-scan attempts
 
 -- Equipment slot strings that appear in item tooltips
 local equipmentSlots = {
@@ -281,6 +283,61 @@ end
 -- Get item type category for a recipe key from the cache
 function Profesjonell.GetRecipeCategory(key)
     return itemTypeCache[key] or nil
+end
+
+-- Re-scan uncategorized items whose tooltips may now be available
+-- Returns true if any new categories were resolved
+function Profesjonell.RescanUncategorizedItems()
+    if not ProfesjonellDB or not itemTypeCacheReady then return false end
+
+    local scanTooltip = Profesjonell.GetScanTooltip and Profesjonell.GetScanTooltip()
+    if not scanTooltip then
+        scanTooltip = CreateFrame("GameTooltip", "ProfesjonellTypeScanTooltip", nil, "GameTooltipTemplate")
+        scanTooltip:SetOwner(UIParent or CreateFrame("Frame"), "ANCHOR_NONE")
+    end
+
+    local changed = false
+    for rKey in pairs(ProfesjonellDB) do
+        if not itemTypeCache[rKey] then
+            -- Try name rules first
+            local recipeName = Profesjonell.GetNameFromKey(rKey)
+            if recipeName then
+                local cleanName = Profesjonell.StripPrefix(recipeName)
+                local inferred = Profesjonell.InferCategoryFromName(cleanName)
+                if inferred then
+                    itemTypeCache[rKey] = inferred
+                    changed = true
+                end
+            end
+            -- Try tooltip scan for non-enchant keys
+            if not itemTypeCache[rKey] then
+                local _, _, linkType, linkId = string.find(rKey, "([^:]+):(%d+)")
+                if linkType and linkId and linkType ~= "e" then
+                    local hyperlink
+                    if linkType == "i" then
+                        hyperlink = "item:" .. linkId .. ":0:0:0"
+                    elseif linkType == "s" then
+                        hyperlink = "spell:" .. linkId
+                    else
+                        hyperlink = linkType .. ":" .. linkId
+                    end
+                    scanTooltip:ClearLines()
+                    scanTooltip:SetOwner(UIParent or CreateFrame("Frame"), "ANCHOR_NONE")
+                    local ok = pcall(function()
+                        scanTooltip:SetHyperlink(hyperlink)
+                    end)
+                    if ok then
+                        local itemType = Profesjonell.ReadItemTypeFromTooltip(scanTooltip)
+                        if itemType then
+                            itemTypeCache[rKey] = itemType
+                            changed = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return changed
 end
 
 -- Invalidate the item type cache (e.g. when DB changes)
@@ -502,7 +559,7 @@ local function CreateSearchWindow()
 
     -- Filter edit box
     local editBox = CreateFrame("EditBox", "ProfesjonellSearchEditBox", f, "InputBoxTemplate")
-    editBox:SetWidth(WINDOW_WIDTH - LEFT_PANE_WIDTH - 60)
+    editBox:SetWidth(WINDOW_WIDTH - LEFT_PANE_WIDTH - 80)
     editBox:SetHeight(20)
     editBox:SetPoint("TOPLEFT", f, "TOPLEFT", LEFT_PANE_WIDTH + 24, -36)
     editBox:SetAutoFocus(false)
@@ -521,6 +578,30 @@ local function CreateSearchWindow()
         editBox:ClearFocus()
     end)
     f.editBox = editBox
+
+    -- Clear filter button
+    local clearBtn = CreateFrame("Button", nil, f)
+    clearBtn:SetWidth(18)
+    clearBtn:SetHeight(18)
+    clearBtn:SetPoint("LEFT", editBox, "RIGHT", 2, 0)
+    clearBtn:SetNormalTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Up")
+    clearBtn:SetPushedTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Down")
+    clearBtn:SetHighlightTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight")
+    clearBtn:SetScript("OnClick", function()
+        editBox:SetText("")
+        editBox:ClearFocus()
+        currentTextFilter = ""
+        Profesjonell.RefreshSearchWindow()
+    end)
+    clearBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(clearBtn, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Clear filter")
+        GameTooltip:Show()
+    end)
+    clearBtn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    f.clearBtn = clearBtn
 
     -- Filter label
     local filterLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -606,15 +687,18 @@ local function CreateSearchWindow()
             GameTooltip:Hide()
         end)
 
-        -- Shift-click to link in chat
+        -- Click to show detail, Shift-click to link in chat
         row:SetScript("OnClick", function()
             local data = row.recipeData
-            if data and data.link and IsShiftKeyDown() then
+            if not data then return end
+            if data.link and IsShiftKeyDown() then
                 if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
                     ChatFrameEditBox:Insert(data.link)
                 elseif ChatEdit_InsertLink then
                     ChatEdit_InsertLink(data.link)
                 end
+            else
+                Profesjonell.ShowRecipeDetail(data)
             end
         end)
 
@@ -627,11 +711,19 @@ local function CreateSearchWindow()
         end)
     end)
 
-    -- OnUpdate for filter debounce
+    -- OnUpdate for filter debounce and periodic re-scan of uncategorized items
     f:SetScript("OnUpdate", function()
         if filterDirty and GetTime() >= filterDirtyTime then
             filterDirty = false
             Profesjonell.RefreshSearchWindow()
+        end
+        -- Periodically re-scan uncategorized items (tooltips may have loaded)
+        local now = GetTime()
+        if itemTypeCacheReady and now >= itemTypeRescanTime then
+            itemTypeRescanTime = now + RESCAN_INTERVAL
+            if Profesjonell.RescanUncategorizedItems() then
+                Profesjonell.RefreshSearchWindow()
+            end
         end
     end)
 
@@ -787,6 +879,349 @@ function Profesjonell.RefreshSearchWindow()
     Profesjonell.UpdateSearchWindowScroll()
 end
 
+----------------------------------------------------------------
+-- Recipe Detail Frame
+----------------------------------------------------------------
+local detailFrame = nil
+local DETAIL_WIDTH = 260
+local DETAIL_MEMBER_ROW_HEIGHT = 16
+local DETAIL_MAX_VISIBLE_MEMBERS = 12
+
+local function CreateDetailFrame()
+    if detailFrame then return detailFrame end
+
+    local df = CreateFrame("Frame", "ProfesjonellDetailFrame", searchFrame)
+    df:SetWidth(DETAIL_WIDTH)
+    df:SetHeight(WINDOW_HEIGHT)
+    df:SetPoint("TOPLEFT", searchFrame, "TOPRIGHT", -2, 0)
+    df:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 11, right = 12, top = 12, bottom = 11 }
+    })
+    df:SetBackdropColor(0, 0, 0, 1)
+    df:SetFrameStrata("HIGH")
+    df:Hide()
+
+    -- Close button
+    local closeBtn = CreateFrame("Button", nil, df, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", df, "TOPRIGHT", -5, -5)
+    closeBtn:SetScript("OnClick", function()
+        df:Hide()
+    end)
+
+    -- Tooltip area (top half) - use a child frame to anchor the GameTooltip-style display
+    local tooltipArea = CreateFrame("Frame", nil, df)
+    tooltipArea:SetWidth(DETAIL_WIDTH - 24)
+    tooltipArea:SetPoint("TOPLEFT", df, "TOPLEFT", 12, -12)
+    tooltipArea:SetHeight(1) -- will be resized dynamically
+    df.tooltipArea = tooltipArea
+
+    -- Tooltip display frame (hidden GameTooltip clone for reading)
+    local detailTooltip = CreateFrame("GameTooltip", "ProfesjonellDetailTooltip", df, "GameTooltipTemplate")
+    detailTooltip:SetOwner(df, "ANCHOR_NONE")
+    detailTooltip:SetPoint("TOPLEFT", tooltipArea, "TOPLEFT", 0, 0)
+    df.detailTooltip = detailTooltip
+
+    -- Separator between tooltip and member lists
+    local sep = df:CreateTexture(nil, "ARTWORK")
+    sep:SetWidth(DETAIL_WIDTH - 30)
+    sep:SetHeight(1)
+    sep:SetTexture(0.4, 0.4, 0.4, 0.8)
+    df.separator = sep
+
+    -- "Known by" header
+    local knownByHeader = df:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    knownByHeader:SetJustifyH("LEFT")
+    knownByHeader:SetText("Known by:")
+    df.knownByHeader = knownByHeader
+
+    -- Scrollable member list area
+    local memberScroll = CreateFrame("ScrollFrame", "ProfesjonellDetailMemberScroll", df)
+    memberScroll:SetWidth(DETAIL_WIDTH - 24)
+    memberScroll:SetHeight(DETAIL_MAX_VISIBLE_MEMBERS * DETAIL_MEMBER_ROW_HEIGHT)
+    df.memberScroll = memberScroll
+
+    -- Scroll child (actual content)
+    local memberArea = CreateFrame("Frame", nil, memberScroll)
+    memberArea:SetWidth(DETAIL_WIDTH - 40)
+    memberArea:SetHeight(1) -- resized dynamically
+    memberScroll:SetScrollChild(memberArea)
+    df.memberArea = memberArea
+
+    -- Scrollbar (slider)
+    local scrollBar = CreateFrame("Slider", "ProfesjonellDetailMemberScrollBar", memberScroll)
+    scrollBar:SetWidth(16)
+    scrollBar:SetPoint("TOPRIGHT", memberScroll, "TOPRIGHT", 0, 0)
+    scrollBar:SetPoint("BOTTOMRIGHT", memberScroll, "BOTTOMRIGHT", 0, 0)
+    scrollBar:SetMinMaxValues(0, 0)
+    scrollBar:SetValueStep(DETAIL_MEMBER_ROW_HEIGHT)
+    scrollBar:SetValue(0)
+    scrollBar:SetBackdrop({
+        bgFile = "Interface\\Buttons\\UI-SliderBar-Background",
+        edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 }
+    })
+    local thumbTex = scrollBar:CreateTexture(nil, "OVERLAY")
+    thumbTex:SetTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+    thumbTex:SetWidth(18)
+    thumbTex:SetHeight(24)
+    scrollBar:SetThumbTexture(thumbTex)
+    scrollBar:SetScript("OnValueChanged", function()
+        memberScroll:SetVerticalScroll(scrollBar:GetValue())
+    end)
+    scrollBar:Hide()
+    df.memberScrollBar = scrollBar
+
+    -- Mouse wheel scrolling
+    memberScroll:EnableMouseWheel(true)
+    memberScroll:SetScript("OnMouseWheel", function()
+        local cur = scrollBar:GetValue()
+        local step = DETAIL_MEMBER_ROW_HEIGHT * 3
+        if arg1 > 0 then
+            scrollBar:SetValue(math.max(0, cur - step))
+        else
+            local _, maxVal = scrollBar:GetMinMaxValues()
+            scrollBar:SetValue(math.min(maxVal, cur + step))
+        end
+    end)
+
+    -- Member rows (created on demand)
+    df.memberRows = {}
+
+    detailFrame = df
+    return df
+end
+
+local function GetOrCreateMemberRow(index)
+    if detailFrame.memberRows[index] then
+        return detailFrame.memberRows[index]
+    end
+
+    local row = CreateFrame("Frame", nil, detailFrame.memberArea)
+    row:SetWidth(DETAIL_WIDTH - 28)
+    row:SetHeight(DETAIL_MEMBER_ROW_HEIGHT)
+
+    -- Online status indicator
+    local statusIcon = row:CreateTexture(nil, "ARTWORK")
+    statusIcon:SetWidth(8)
+    statusIcon:SetHeight(8)
+    statusIcon:SetPoint("LEFT", row, "LEFT", 0, 0)
+    row.statusIcon = statusIcon
+
+    -- Member name
+    local nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    nameText:SetPoint("LEFT", statusIcon, "RIGHT", 4, 0)
+    nameText:SetJustifyH("LEFT")
+    row.nameText = nameText
+
+    -- Whisper button (only for online members)
+    local whisperBtn = CreateFrame("Button", nil, row)
+    whisperBtn:SetWidth(14)
+    whisperBtn:SetHeight(14)
+    whisperBtn:SetPoint("RIGHT", row, "RIGHT", -18, 0)
+    whisperBtn:SetNormalTexture("Interface\\GossipFrame\\GossipGossipIcon")
+    whisperBtn:SetHighlightTexture("Interface\\GossipFrame\\GossipGossipIcon")
+    row.whisperBtn = whisperBtn
+
+    detailFrame.memberRows[index] = row
+    return row
+end
+
+-- Show the detail frame for a given recipe
+function Profesjonell.ShowRecipeDetail(recipeData)
+    if not searchFrame or not recipeData then return end
+
+    local df = CreateDetailFrame()
+
+    -- Set tooltip (top half) - only for item keys, not spell/enchant
+    local tooltip = df.detailTooltip
+    tooltip:ClearLines()
+    tooltip:SetOwner(df, "ANCHOR_NONE")
+    tooltip:SetPoint("TOPLEFT", df.tooltipArea, "TOPLEFT", 0, 0)
+
+    local hasTooltip = false
+    if not string.find(recipeData.key, "^s:") then
+        local _, _, linkType, linkId = string.find(recipeData.link or "", "|H(%a+):(%d+)")
+        if linkType and linkId then
+            local ok = pcall(function()
+                tooltip:SetHyperlink(linkType .. ":" .. linkId)
+            end)
+            if ok and tooltip:NumLines() and tooltip:NumLines() > 0 then
+                hasTooltip = true
+                tooltip:Show()
+            end
+        end
+    end
+
+    if not hasTooltip then
+        tooltip:Hide()
+        -- For enchants/spells with no tooltip, show recipe name as a label
+        if recipeData.name and recipeData.name ~= "" then
+            if not df.enchantLabel then
+                df.enchantLabel = df.tooltipArea:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+                df.enchantLabel:SetPoint("TOPLEFT", df.tooltipArea, "TOPLEFT", 4, -4)
+            end
+            df.enchantLabel:SetText(recipeData.name)
+            df.enchantLabel:Show()
+        else
+            if df.enchantLabel then
+                df.enchantLabel:Hide()
+            end
+        end
+    else
+        if df.enchantLabel then
+            df.enchantLabel:Hide()
+        end
+    end
+
+    -- Calculate where the member list starts using actual tooltip dimensions
+    local tooltipHeight = 0
+    local tooltipWidth = 0
+    if hasTooltip then
+        tooltipHeight = tooltip:GetHeight() or 0
+        tooltipWidth = tooltip:GetWidth() or 0
+        if tooltipHeight < 1 then
+            -- Fallback: estimate from line count
+            local numLines = tooltip:NumLines() or 0
+            tooltipHeight = math.max(numLines * 14 + 16, 30)
+        end
+    end
+    -- For enchants with no tooltip, use the label height
+    if not hasTooltip and df.enchantLabel and df.enchantLabel:IsShown() then
+        tooltipHeight = (df.enchantLabel:GetHeight() or 14) + 12
+    end
+    df.tooltipArea:SetHeight(math.max(tooltipHeight, 1))
+
+    -- Resize detail frame width to fit tooltip if needed
+    local minWidth = DETAIL_WIDTH
+    local neededWidth = tooltipWidth + 24 -- 12px padding each side
+    local frameWidth = math.max(minWidth, neededWidth)
+    df:SetWidth(frameWidth)
+
+    -- Position separator
+    local sepY = -12 - tooltipHeight - 8
+    df.separator:SetPoint("TOPLEFT", df, "TOPLEFT", 15, sepY)
+
+    -- Position "Known by" header
+    df.knownByHeader:SetPoint("TOPLEFT", df, "TOPLEFT", 14, sepY - 8)
+
+    -- Position member scroll area
+    df.memberScroll:SetPoint("TOPLEFT", df, "TOPLEFT", 14, sepY - 24)
+
+    -- Build online/offline member lists
+    local onlineMembers = {}
+    local offlineMembers = {}
+    local holders = recipeData.holders or {}
+    for _, name in ipairs(holders) do
+        if Profesjonell.GuildRosterOnlineCache and Profesjonell.GuildRosterOnlineCache[name] then
+            table.insert(onlineMembers, name)
+        else
+            table.insert(offlineMembers, name)
+        end
+    end
+    table.sort(onlineMembers, function(a, b) return string.lower(a) < string.lower(b) end)
+    table.sort(offlineMembers, function(a, b) return string.lower(a) < string.lower(b) end)
+
+    -- Hide all existing member rows
+    for _, row in ipairs(df.memberRows) do
+        row:Hide()
+    end
+
+    local rowIndex = 0
+
+    -- Online members
+    for _, name in ipairs(onlineMembers) do
+        rowIndex = rowIndex + 1
+        local row = GetOrCreateMemberRow(rowIndex)
+        row:SetPoint("TOPLEFT", df.memberArea, "TOPLEFT", 0, -((rowIndex - 1) * DETAIL_MEMBER_ROW_HEIGHT))
+        row.statusIcon:SetTexture(0, 1, 0, 1) -- green dot
+        row.nameText:SetText(name)
+        local classColor = Profesjonell.GetClassColor(Profesjonell.GuildRosterCache and Profesjonell.GuildRosterCache[name])
+        if classColor then
+            local cr = tonumber(string.sub(classColor, 1, 2), 16) / 255
+            local cg = tonumber(string.sub(classColor, 3, 4), 16) / 255
+            local cb = tonumber(string.sub(classColor, 5, 6), 16) / 255
+            row.nameText:SetTextColor(cr, cg, cb)
+        else
+            row.nameText:SetTextColor(1, 1, 1)
+        end
+        row.whisperBtn:Show()
+        local capturedName = name
+        row.whisperBtn:SetScript("OnClick", function()
+            if ChatFrameEditBox then
+                ChatFrameEditBox:Show()
+                ChatFrameEditBox:SetText("/w " .. capturedName .. " ")
+                ChatFrameEditBox:SetFocus()
+            end
+        end)
+        row.whisperBtn:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(row.whisperBtn, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Whisper " .. capturedName)
+            GameTooltip:Show()
+        end)
+        row.whisperBtn:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+        row:Show()
+    end
+
+    -- Offline members
+    for _, name in ipairs(offlineMembers) do
+        rowIndex = rowIndex + 1
+        local row = GetOrCreateMemberRow(rowIndex)
+        row:SetPoint("TOPLEFT", df.memberArea, "TOPLEFT", 0, -((rowIndex - 1) * DETAIL_MEMBER_ROW_HEIGHT))
+        row.statusIcon:SetTexture(0.5, 0.5, 0.5, 1) -- gray dot
+        row.nameText:SetText(name)
+        local classColor = Profesjonell.GetClassColor(Profesjonell.GuildRosterCache and Profesjonell.GuildRosterCache[name])
+        if classColor then
+            local cr = tonumber(string.sub(classColor, 1, 2), 16) / 255
+            local cg = tonumber(string.sub(classColor, 3, 4), 16) / 255
+            local cb = tonumber(string.sub(classColor, 5, 6), 16) / 255
+            row.nameText:SetTextColor(cr, cg, cb)
+        else
+            row.nameText:SetTextColor(0.6, 0.6, 0.6)
+        end
+        row.whisperBtn:Hide()
+        row:Show()
+    end
+
+    -- Set up scrolling if needed
+    local totalMemberHeight = rowIndex * DETAIL_MEMBER_ROW_HEIGHT
+    df.memberArea:SetHeight(totalMemberHeight)
+    local visibleMemberHeight
+    if rowIndex > DETAIL_MAX_VISIBLE_MEMBERS then
+        visibleMemberHeight = DETAIL_MAX_VISIBLE_MEMBERS * DETAIL_MEMBER_ROW_HEIGHT
+        local maxScroll = totalMemberHeight - visibleMemberHeight
+        df.memberScrollBar:SetMinMaxValues(0, maxScroll)
+        df.memberScrollBar:SetValue(0)
+        df.memberScrollBar:Show()
+        df.memberScroll:SetVerticalScroll(0)
+    else
+        visibleMemberHeight = totalMemberHeight
+        df.memberScrollBar:SetMinMaxValues(0, 0)
+        df.memberScrollBar:SetValue(0)
+        df.memberScrollBar:Hide()
+        df.memberScroll:SetVerticalScroll(0)
+    end
+    df.memberScroll:SetHeight(visibleMemberHeight)
+
+    -- Resize the detail frame to fit content
+    local totalHeight = 12 + tooltipHeight + 8 + 1 + 8 + 16 + visibleMemberHeight + 16
+    df:SetHeight(math.max(totalHeight, 100))
+
+    df:Show()
+end
+
+-- Hide the detail frame
+function Profesjonell.HideRecipeDetail()
+    if detailFrame then
+        detailFrame:Hide()
+    end
+end
+
 -- Show/hide the progress bar overlay
 local function ShowProgressBar(show)
     if not searchFrame then return end
@@ -855,8 +1290,10 @@ function Profesjonell.ToggleSearchWindow()
     end
 
     if searchFrame:IsShown() then
+        Profesjonell.HideRecipeDetail()
         searchFrame:Hide()
     else
+        Profesjonell.HideRecipeDetail()
         currentTextFilter = ""
         currentCategoryFilter = nil
         if searchFrame.editBox then
